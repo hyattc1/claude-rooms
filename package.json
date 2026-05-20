@@ -1,0 +1,30 @@
+{
+  "name": "claude-rooms",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multiplayer Claude Code plugin runtime: MCP server, hooks, and slash command implementations.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0 <23"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@roamhq/wrtc": "^0.8.0",
+    "simple-peer": "^9.11.1",
+    "ws": "^8.18.0",
+    "y-protocols": "^1.0.6",
+    "y-webrtc": "^10.3.0",
+    "yjs": "^13.6.21"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "@types/simple-peer": "^9.11.8",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.0"
+  }
+}

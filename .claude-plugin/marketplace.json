@@ -1,0 +1,16 @@
+{
+  "name": "claude-rooms",
+  "owner": {
+    "name": "Connor Hyatt"
+  },
+  "description": "Multiplayer Claude Code. Live shared state between developers running their own Claude Code sessions.",
+  "plugins": [
+    {
+      "name": "claude-rooms",
+      "source": "./",
+      "description": "Multiplayer Claude Code plugin.",
+      "category": "collaboration",
+      "tags": ["multiplayer", "collaboration", "webrtc", "yjs"]
+    }
+  ]
+}

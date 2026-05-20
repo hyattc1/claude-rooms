@@ -1,0 +1,26 @@
+{
+  "name": "claude-rooms",
+  "version": "0.1.0",
+  "description": "Multiplayer Claude Code. Two or more developers each running their own Claude Code session, sharing live state of what their agents are doing, in real time.",
+  "author": {
+    "name": "Connor Hyatt"
+  },
+  "repository": "https://github.com/hyattc1/claude-rooms",
+  "homepage": "https://github.com/hyattc1/claude-rooms",
+  "license": "MIT",
+  "keywords": ["multiplayer", "collaboration", "webrtc", "yjs", "pair-programming"],
+  "userConfig": {
+    "actor_name": {
+      "type": "string",
+      "title": "Actor name",
+      "description": "Short identifier other teammates see for you in the room. Defaults to your git user.name, kebab-cased. Override here if you want something different.",
+      "required": false
+    }
+  },
+  "mcpServers": {
+    "claude-rooms": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp/server.js"]
+    }
+  }
+}
