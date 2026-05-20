@@ -40,10 +40,38 @@ Full design rationale (state schema, lock semantics, awareness reaping, the six 
 |---|---|
 | `/claude-rooms:rooms-create` | Generate a new room code and join it. Share the code with a teammate. |
 | `/claude-rooms:rooms-join <code>` | Join an existing room. Warns if no teammates are detected after 3 seconds. |
-| `/claude-rooms:rooms-status` | Print the current room code, you, teammates, and active file locks. |
-| `/claude-rooms:rooms-leave` | Release your locks, mark offline, and clear the local room state. |
+| `/claude-rooms:rooms-status` | Print the current room code, you, teammates, active file locks, and any territory overlaps. |
+| `/claude-rooms:rooms-leave` | Release your locks, drop your territory claim, mark offline, and clear the local room state. |
 
-Inside the plugin, the agent also has two MCP tools: `read_room_state` (read teammate snapshot) and `update_my_focus` (publish a one-phrase status).
+Inside the plugin, the agent also has these MCP tools:
+
+| Tool | What it does |
+|---|---|
+| `read_room_state` | Snapshot of every teammate's live state. Call it liberally. |
+| `update_my_focus` | One-phrase status, so teammates see what you are currently working on. |
+| `update_my_plan` | Compact summary of a multi-step plan plus done/total counts. |
+| `claim_territory` | Declare which directories/files you intend to touch for the current task. |
+| `release_territory` | Drop your current territory claim. |
+
+## What v1.1 adds
+
+Four awareness signals that meaningfully deepen the multiplayer feel without adding external services or auth.
+
+- **Git state.** Each agent's `read_room_state` view now includes the teammate's repo, branch, short head, dirty flag, and last 5 commit subjects. `/rooms-status` lays it out per teammate. SessionStart context tags each teammate as "same branch as you, watch for conflicts", "same repo, different branch", or "different repo, probably independent work" based on a comparison with your own git state.
+- **Plan-mode awareness.** When the agent is in Claude Code's plan mode, claude-rooms detects it via `permission_mode === "plan"` in hook stdin and exposes it on the actor record. The agent can call the new `update_my_plan` tool to share a one-phrase plan summary and how many checklist steps it has finished. For small one-off tasks the field stays null, so the UI does not get noisy.
+- **Last user message preview.** A new `UserPromptSubmit` hook publishes the first 100 characters of each prompt so teammates can see the gist of what each user is asking. See the privacy note below for the opt-out.
+- **Territory declarations.** The soft coordination layer that sits above hard file locks. The agent calls `claim_territory(['src/api/users.*', 'tests/users.*'], 'add users endpoint')` at the start of substantial tasks. Teammates see the claim and route around it at the planning stage. The PreToolUse hook also adds a soft warning to its allow-branch additionalContext when an edit lands inside a teammate's territory (the edit still proceeds because there is no lock; the warning just nudges coordination). Claims auto-expire after 2 hours.
+
+The Y.Doc schema bumps to version 2 with these fields. v1.0 clients can still join v1.1 rooms; their states show up without the new fields and v1.1 clients render them gracefully.
+
+## Privacy and sharing
+
+Two things are visible to teammates in your room:
+
+- **Metadata only.** Your repo name, branch, short SHA, dirty flag, focus, plan summary, territory globs, file paths, and last user prompt preview. No code contents.
+- **Prompts** are shared by default as a 100-character preview. Set `share_prompts` to `false` in the plugin's `userConfig` to disable; when off, your `last_prompt` field stays null and teammates see no preview.
+
+claude-rooms still never sends file contents over the wire. Everything routes peer-to-peer through y-webrtc; even on TURN fallback only metadata transits the relay.
 
 ## Known warts
 
@@ -56,7 +84,7 @@ Inside the plugin, the agent also has two MCP tools: `read_room_state` (read tea
 
 ## Status and roadmap
 
-This is v1. Out of scope for v1 (see the "What v2 might add" section in [CLAUDE.md](./CLAUDE.md)): agent-to-agent ask inboxes, persistent rooms with history, per-actor curated state projections, web dashboard, self-hosted relay option, human-facing presence display in the terminal, and a `/rooms-diagnose` bundle. Bug fixes will bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
+This is v1.1 (`0.2.0` in `plugin.json`). Out of scope for v1.1 (see the "What v2 might add" section in [CLAUDE.md](./CLAUDE.md)): agent-to-agent ask inboxes, persistent rooms with history, per-actor curated state projections, web dashboard, self-hosted relay option, human-facing presence display in the terminal, GitHub API integration, test/build status sharing (v1.2 candidate), and a `/rooms-diagnose` bundle. Bug fixes bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
 
 ## License
 

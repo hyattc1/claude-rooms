@@ -13,7 +13,26 @@ export interface HookInput {
   stop_reason?: string;
   reason?: string;
   source?: string;
+  /** Claude Code includes this in tool-context hooks. Value "plan" means
+   *  the agent is in plan mode; everything else means not in plan mode. */
+  permission_mode?: string;
+  /** UserPromptSubmit only. */
+  prompt?: string;
   [k: string]: unknown;
+}
+
+/** True when Claude is currently in plan mode (permission_mode === "plan"). */
+export function inPlanMode(input: HookInput): boolean {
+  return input.permission_mode === "plan";
+}
+
+/** Returns true when share_prompts is explicitly disabled by the user. */
+export function sharePromptsEnabled(): boolean {
+  const v = process.env.CLAUDE_PLUGIN_OPTION_SHARE_PROMPTS;
+  if (v == null) return true; // default true
+  const s = String(v).trim().toLowerCase();
+  if (s === "" || s === "false" || s === "0" || s === "no" || s === "off") return false;
+  return true;
 }
 
 /** Read the hook's stdin JSON. Returns an empty object on any error. */

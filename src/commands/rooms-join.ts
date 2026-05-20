@@ -1,6 +1,7 @@
 import { normalizeRoomCode } from "../room-code.js";
 import { resolveActorName } from "../actor.js";
 import { writeSessionState } from "../session-store.js";
+import { readGitState } from "../git-state.js";
 import { getSessionId, ipcCall, exitWith } from "./_common.js";
 
 interface RoomStatus {
@@ -37,6 +38,9 @@ async function main(): Promise<void> {
 
   // Prime the MCP server so the y-webrtc connection starts immediately.
   await ipcCall("room_status", { session_id: sessionId });
+  // Publish initial git so other peers see this actor with full state.
+  const git = readGitState(process.cwd(), { includeCommits: true });
+  await ipcCall("update_my_git", { session_id: sessionId, state: git, include_commits: true });
 
   // Brief poll for peers (up to 3s). y-webrtc takes a moment to discover
   // peers via the public signaling servers; this gives the user a more

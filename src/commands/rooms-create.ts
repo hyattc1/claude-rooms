@@ -1,6 +1,7 @@
 import { generateRoomCode } from "../room-code.js";
 import { resolveActorName } from "../actor.js";
 import { writeSessionState } from "../session-store.js";
+import { readGitState } from "../git-state.js";
 import { getSessionId, ipcCall, exitWith } from "./_common.js";
 
 async function main(): Promise<void> {
@@ -19,6 +20,9 @@ async function main(): Promise<void> {
   // y-webrtc connection in the background, so the room is "live" by the
   // time the user shares the code.
   await ipcCall("room_status", { session_id: sessionId });
+  // Publish initial git so /rooms-status shows the joiner immediately.
+  const git = readGitState(process.cwd(), { includeCommits: true });
+  await ipcCall("update_my_git", { session_id: sessionId, state: git, include_commits: true });
   exitWith(
     `Room: ${code}\n` +
     `You are joined as ${actor}.\n` +

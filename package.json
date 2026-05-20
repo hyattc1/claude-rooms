@@ -1,6 +1,6 @@
 {
   "name": "claude-rooms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Multiplayer Claude Code plugin runtime: MCP server, hooks, and slash command implementations.",
@@ -17,6 +17,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@roamhq/wrtc": "^0.8.0",
+    "minimatch": "^10.0.1",
     "simple-peer": "^9.11.1",
     "ws": "^8.18.0",
     "y-protocols": "^1.0.6",

@@ -28,6 +28,34 @@ export interface ActionEvent {
   details?: Record<string, unknown>;
 }
 
+export interface GitState {
+  repo: string;
+  branch: string;
+  head: string;
+  dirty: boolean;
+  recent_commits: string[];
+}
+
+export interface PlanState {
+  in_plan_mode: boolean;
+  summary: string;
+  steps_total: number;
+  steps_done: number;
+  updated_at_ms: number;
+}
+
+export interface LastPromptState {
+  text: string;
+  at_ms: number;
+}
+
+export interface TerritoryClaim {
+  globs: string[];
+  purpose: string;
+  claimed_at_ms: number;
+  ttl_ms: number;
+}
+
 export interface ActorState {
   actor: string;
   focus: string;
@@ -38,6 +66,17 @@ export interface ActorState {
   blockers: string[];
   online: boolean;
   last_heartbeat_ms: number;
+  // v1.1 additive fields. Optional for cross-version graceful degradation.
+  git?: GitState | null;
+  plan?: PlanState | null;
+  last_prompt?: LastPromptState | null;
+}
+
+/** Snapshot-only: territory is stored in a separate Y.Map so its TTL can be
+ *  handled without rewriting the whole actor record, but the snapshot joins
+ *  it into the per-actor view for downstream consumers. */
+export interface ActorStateView extends ActorState {
+  territory?: TerritoryClaim | null;
 }
 
 export interface LockEntry {
@@ -50,18 +89,34 @@ export const DEFAULT_LOCK_TTL_MS = 60 * 60 * 1000; // 60 minutes
 export const SET_MY_STATE_DEBOUNCE_MS = 250;
 export const RECENT_ACTIONS_CAP = 10;
 
+export const SCHEMA_VERSION = 2;
+export const DEFAULT_TERRITORY_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+export const GIT_FULL_REFRESH_MIN_INTERVAL_MS = 5000;
+
+export interface TerritoryOverlap {
+  file: string;
+  teammate: string;
+  purpose: string;
+}
+
 export interface RoomSnapshot {
+  schema_version: number;
   room_code: string;
   me: string;
-  actors: ActorState[];
+  actors: ActorStateView[];
   locks: Array<{ file: string; entry: LockEntry }>;
   online_peer_count: number;
+  /** Files this actor has touched recently that fall inside any teammate's
+   *  active territory. Empty array when none. */
+  territory_overlap: TerritoryOverlap[];
 }
 
 export interface TryAcquireResult {
   ok: boolean;
   held?: Array<{ file: string; actor: string }>;
 }
+
+import { findOverlaps } from "./territory.js";
 
 export class Room {
   readonly roomCode: string;
@@ -72,10 +127,14 @@ export class Room {
   private actors!: Y.Map<ActorState>;
   private locks!: Y.Map<LockEntry>;
   private events!: Y.Map<unknown>; // reserved for room-level events; unused in v1
+  private territories!: Y.Map<TerritoryClaim>;
+  private meta!: Y.Map<unknown>;
   private pendingPatch: Partial<ActorState> | null = null;
   private debounceTimer: NodeJS.Timeout | null = null;
   private destroyed = false;
   private lockTtlMs: number;
+  /** Most-recent full git refresh times per actor, for the 5s throttle. */
+  private lastFullGitRefreshMs = 0;
 
   constructor(roomCode: string, me: string, opts: { lockTtlMs?: number; ydoc?: Y.Doc } = {}) {
     this.roomCode = roomCode;
@@ -85,6 +144,16 @@ export class Room {
     this.actors = this.ydoc.getMap<ActorState>("actors");
     this.locks = this.ydoc.getMap<LockEntry>("locks");
     this.events = this.ydoc.getMap("events");
+    this.territories = this.ydoc.getMap<TerritoryClaim>("territories");
+    this.meta = this.ydoc.getMap("meta");
+    // Schema-version handshake. New clients bump the version if missing or
+    // older than what they understand; old clients ignore the meta map.
+    this.ydoc.transact(() => {
+      const cur = this.meta.get("schema_version");
+      if (typeof cur !== "number" || cur < SCHEMA_VERSION) {
+        this.meta.set("schema_version", SCHEMA_VERSION);
+      }
+    });
   }
 
   /**
@@ -156,12 +225,15 @@ export class Room {
         if (typeof a === "string") this.clientIdToActor.set(cid, a);
       }
       if (departed.size === 0) return;
-      // Reap locks held by departed actors.
+      // Reap locks AND territory claims held by departed actors.
       this.ydoc.transact(() => {
         for (const [file, entry] of this.locks.entries()) {
           if (departed.has(entry.actor)) {
             this.locks.delete(file);
           }
+        }
+        for (const actor of departed) {
+          if (this.territories.has(actor)) this.territories.delete(actor);
         }
         // Mark them offline in the actors map so /rooms-status reflects the drop.
         for (const actor of departed) {
@@ -181,21 +253,183 @@ export class Room {
 
   /** Local read of the live Y.Doc. Sub-100ms. */
   getSnapshot(): RoomSnapshot {
-    const actors: ActorState[] = [];
-    for (const [, v] of this.actors) actors.push(v);
-    const locks: Array<{ file: string; entry: LockEntry }> = [];
     const now = Date.now();
+    const actors: ActorStateView[] = [];
+    for (const [actorName, v] of this.actors) {
+      const claim = this.territories.get(actorName);
+      const territory = claim && !this.isClaimExpired(claim, now) ? claim : null;
+      actors.push({ ...v, territory });
+    }
+    const locks: Array<{ file: string; entry: LockEntry }> = [];
     for (const [file, entry] of this.locks) {
       if (now - entry.acquired_at_ms > entry.ttl_ms) continue; // hide expired
       locks.push({ file, entry });
     }
     const online_peer_count = actors.filter((a) => a.online && a.actor !== this.me).length;
+
+    // Territory overlap: any of my recently-touched files (files_open + last
+    // action files) intersected with any teammate's active territory.
+    const me = actors.find((a) => a.actor === this.me);
+    const myFiles = new Set<string>();
+    if (me) {
+      for (const f of me.files_open ?? []) myFiles.add(f);
+      if (me.last_action && Array.isArray(me.last_action.files)) {
+        for (const f of me.last_action.files) myFiles.add(f);
+      }
+    }
+    const teammates = actors
+      .filter((a) => a.actor !== this.me)
+      .map((a) => ({ actor: a.actor, territory: a.territory ?? null }));
+    const territory_overlap = findOverlaps([...myFiles], teammates);
+
     return {
+      schema_version: SCHEMA_VERSION,
       room_code: this.roomCode,
       me: this.me,
       actors,
       locks,
       online_peer_count,
+      territory_overlap,
+    };
+  }
+
+  // ---- Territory ----
+
+  isClaimExpired(claim: TerritoryClaim, now = Date.now()): boolean {
+    return now - claim.claimed_at_ms > claim.ttl_ms;
+  }
+
+  /** Replace this actor's territory claim. */
+  claimTerritory(globs: string[], purpose: string, ttlMs = DEFAULT_TERRITORY_TTL_MS): TerritoryClaim {
+    const claim: TerritoryClaim = {
+      globs: [...globs],
+      purpose: purpose.slice(0, 200),
+      claimed_at_ms: Date.now(),
+      ttl_ms: ttlMs,
+    };
+    this.ydoc.transact(() => {
+      this.territories.set(this.me, claim);
+    });
+    return claim;
+  }
+
+  releaseTerritory(): void {
+    this.ydoc.transact(() => {
+      this.territories.delete(this.me);
+    });
+  }
+
+  getMyTerritory(): TerritoryClaim | null {
+    const c = this.territories.get(this.me);
+    if (!c) return null;
+    return this.isClaimExpired(c) ? null : c;
+  }
+
+  /** Check whether the supplied files overlap any teammate's active territory.
+   *  Returns empty array if not. Caller can use this on the PreToolUse path
+   *  to emit a soft warning. */
+  checkTerritoryOverlap(files: string[]): TerritoryOverlap[] {
+    const now = Date.now();
+    const teammates: Array<{ actor: string; territory: TerritoryClaim | null }> = [];
+    for (const [actor, claim] of this.territories) {
+      if (actor === this.me) continue;
+      if (this.isClaimExpired(claim, now)) continue;
+      teammates.push({ actor, territory: claim });
+    }
+    return findOverlaps(files, teammates);
+  }
+
+  // ---- Plan state ----
+
+  /** Update this actor's plan record. Called by both hooks (in_plan_mode
+   *  signal from permission_mode) and by the update_my_plan MCP tool. */
+  updatePlan(patch: Partial<PlanState>): void {
+    this.ydoc.transact(() => {
+      const cur = this.actors.get(this.me);
+      const existing = cur?.plan ?? null;
+      const next: PlanState = {
+        in_plan_mode: existing?.in_plan_mode ?? false,
+        summary: existing?.summary ?? "",
+        steps_total: existing?.steps_total ?? 0,
+        steps_done: existing?.steps_done ?? 0,
+        updated_at_ms: Date.now(),
+        ...patch,
+      };
+      // If nothing meaningful is set, leave plan null to avoid empty UI rows.
+      const meaningful = next.in_plan_mode || next.summary.length > 0
+        || next.steps_total > 0 || next.steps_done > 0;
+      const merged: ActorState = {
+        ...(cur ?? this.makeInitialSelf()),
+        plan: meaningful ? next : null,
+        last_heartbeat_ms: Date.now(),
+      };
+      this.actors.set(this.me, merged);
+    });
+  }
+
+  // ---- Git state ----
+
+  /** Merge a git refresh from this actor's hooks. If the supplied state is
+   *  light (no commits) and `head` matches a previously cached entry, the
+   *  cached commits are preserved. Throttled to one full refresh per 5s. */
+  mergeGitState(input: GitState | null, opts: { includeCommits: boolean }): void {
+    const now = Date.now();
+    if (opts.includeCommits) {
+      if (now - this.lastFullGitRefreshMs < GIT_FULL_REFRESH_MIN_INTERVAL_MS) {
+        // Throttle: degrade to a light refresh.
+        opts = { includeCommits: false };
+      } else {
+        this.lastFullGitRefreshMs = now;
+      }
+    }
+    this.ydoc.transact(() => {
+      const cur = this.actors.get(this.me) ?? this.makeInitialSelf();
+      let nextGit: GitState | null = input;
+      if (input && !opts.includeCommits) {
+        // Preserve cached commits if HEAD did not change.
+        const prev = cur.git ?? null;
+        if (prev && prev.head === input.head) {
+          nextGit = { ...input, recent_commits: prev.recent_commits };
+        } else {
+          nextGit = { ...input, recent_commits: [] };
+        }
+      }
+      const merged: ActorState = {
+        ...cur,
+        git: nextGit,
+        // Also mirror branch into the existing top-level branch field so old
+        // v1 clients see something useful.
+        branch: nextGit?.branch ?? cur.branch,
+        last_heartbeat_ms: Date.now(),
+      };
+      this.actors.set(this.me, merged);
+    });
+  }
+
+  // ---- Last prompt ----
+
+  setLastPrompt(prompt: LastPromptState | null): void {
+    this.ydoc.transact(() => {
+      const cur = this.actors.get(this.me) ?? this.makeInitialSelf();
+      this.actors.set(this.me, {
+        ...cur,
+        last_prompt: prompt,
+        last_heartbeat_ms: Date.now(),
+      });
+    });
+  }
+
+  private makeInitialSelf(): ActorState {
+    return {
+      actor: this.me,
+      focus: "",
+      branch: "",
+      files_open: [],
+      last_action: null,
+      recent_actions: [],
+      blockers: [],
+      online: true,
+      last_heartbeat_ms: Date.now(),
     };
   }
 
@@ -335,10 +569,11 @@ export class Room {
     });
   }
 
-  /** Mark this actor offline, release locks, destroy awareness. */
+  /** Mark this actor offline, release locks, release territory, destroy awareness. */
   markOffline(): void {
     this.flushMyState();
     this.releaseAllMyLocks();
+    this.releaseTerritory();
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me);
       if (cur) this.actors.set(this.me, { ...cur, online: false });

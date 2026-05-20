@@ -19,10 +19,17 @@ import * as Y from "yjs";
 
 import { IpcServer } from "../ipc.js";
 import { readSessionState } from "../session-store.js";
-import { Room, type ActorState, type ActionEvent, type RoomSnapshot } from "../shared-state.js";
+import {
+  Room,
+  type ActorState,
+  type ActionEvent,
+  type RoomSnapshot,
+  type GitState,
+  type TerritoryOverlap,
+} from "../shared-state.js";
 
 const SERVER_NAME = "claude-rooms";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 
 // Test mode is opt-in via env var. When set, the MCP server skips the
 // y-webrtc connection AND shares a single Y.Doc per room_code across all
@@ -94,6 +101,23 @@ Call this:
 When you see a teammate's recent activity that may affect your work, factor it into your plan and tell the user about it. Their work changes the ground truth you are operating on.`;
 
 const UPDATE_MY_FOCUS_DESC = `Sets a short description of what you are currently working on, so teammates' agents can see it. Call this when the user gives you a new task, when the focus of the current task shifts significantly, or when you start a new sub-task. Keep the description short (one phrase, lowercase, like "refactoring auth middleware" or "writing tests for users endpoint").`;
+
+const UPDATE_MY_PLAN_DESC = `Share a compact summary of the multi-step plan you are currently executing, so teammates can see your progress at a glance. Call this:
+- When you enter plan mode and produce a plan: set summary (one short phrase), steps_total to the number of top-level checklist items, steps_done to 0.
+- When the user approves and you start executing: leave summary and steps_total alone, bump steps_done as you complete each step.
+- When the plan is complete: call with steps_done equal to steps_total, or simply stop calling and the next plan call replaces this one.
+For tasks that do not have a multi-step plan, do not call this tool. A small one-off edit does not need a plan.`;
+
+const CLAIM_TERRITORY_DESC = `Tell teammates which areas of the codebase you intend to work in for the current task. Globs are gitignore-style patterns relative to your project root. Purpose is a short phrase describing what you are doing. The MCP server replaces your previous claim, if any.
+
+Call this at the start of any substantial task. Examples:
+- ['src/auth/**', 'src/middleware/auth.ts'] for an auth refactor.
+- ['src/api/users.*', 'tests/users.*'] for a users endpoint.
+- ['docs/**'] for documentation work.
+
+Teammates' agents will see your claim and route around it at the planning stage, before any edit-attempt conflict. Calling this is cheap. Skip it only for genuinely tiny tasks that touch one or two files you can name explicitly to the user.`;
+
+const RELEASE_TERRITORY_DESC = `Drop your current territory claim. Call this when the task is ending or when you are shifting to a different area of the codebase.`;
 
 // --- Helpers ---
 
@@ -236,6 +260,82 @@ async function main(): Promise<void> {
     };
   });
 
+  // ---- v1.1 IPC methods ----
+
+  ipc.on<{ session_id: string; state: GitState | null; include_commits?: boolean }>(
+    "update_my_git",
+    ({ session_id, state, include_commits }) => {
+      adopt(session_id);
+      const room = ctx.manager.ensureRoomSync(session_id);
+      if (!room) return { applied: false };
+      room.mergeGitState(state, { includeCommits: !!include_commits });
+      return { applied: true };
+    }
+  );
+
+  ipc.on<{
+    session_id: string;
+    in_plan_mode?: boolean;
+    summary?: string;
+    steps_total?: number;
+    steps_done?: number;
+  }>("update_my_plan", ({ session_id, in_plan_mode, summary, steps_total, steps_done }) => {
+    adopt(session_id);
+    const room = ctx.manager.ensureRoomSync(session_id);
+    if (!room) return { applied: false };
+    const patch: Record<string, unknown> = {};
+    if (typeof in_plan_mode === "boolean") patch.in_plan_mode = in_plan_mode;
+    if (typeof summary === "string") patch.summary = summary;
+    if (typeof steps_total === "number") patch.steps_total = steps_total;
+    if (typeof steps_done === "number") patch.steps_done = steps_done;
+    room.updatePlan(patch);
+    return { applied: true };
+  });
+
+  ipc.on<{ session_id: string; text: string | null }>(
+    "set_last_prompt",
+    ({ session_id, text }) => {
+      adopt(session_id);
+      const room = ctx.manager.ensureRoomSync(session_id);
+      if (!room) return { applied: false };
+      if (text == null) {
+        room.setLastPrompt(null);
+      } else {
+        room.setLastPrompt({ text, at_ms: Date.now() });
+      }
+      return { applied: true };
+    }
+  );
+
+  ipc.on<{ session_id: string; globs: string[]; purpose: string; ttl_ms?: number }>(
+    "claim_territory",
+    ({ session_id, globs, purpose, ttl_ms }) => {
+      adopt(session_id);
+      const room = ctx.manager.ensureRoomSync(session_id);
+      if (!room) return { claimed: false };
+      const claim = room.claimTerritory(globs ?? [], purpose ?? "", ttl_ms);
+      return { claimed: true, claim };
+    }
+  );
+
+  ipc.on<{ session_id: string }>("release_territory", ({ session_id }) => {
+    adopt(session_id);
+    const room = ctx.manager.ensureRoomSync(session_id);
+    if (!room) return { released: false };
+    room.releaseTerritory();
+    return { released: true };
+  });
+
+  ipc.on<{ session_id: string; files: string[] }>(
+    "check_territory_overlap",
+    ({ session_id, files }) => {
+      adopt(session_id);
+      const room = ctx.manager.ensureRoomSync(session_id);
+      if (!room) return { overlaps: [] as TerritoryOverlap[] };
+      return { overlaps: room.checkTerritoryOverlap(files ?? []) };
+    }
+  );
+
   await ipc.start();
 
   // ---- MCP server (agent-facing) ----
@@ -302,6 +402,82 @@ async function main(): Promise<void> {
       return {
         content: [{ type: "text", text: `Updated focus: ${focus}` }],
       };
+    }
+  );
+
+  mcp.registerTool(
+    "update_my_plan",
+    {
+      description: UPDATE_MY_PLAN_DESC,
+      inputSchema: {
+        summary: z.string().min(1).max(200)
+          .describe('Short phrase describing the plan, e.g. "add /users endpoint with pagination".'),
+        steps_total: z.number().int().min(0).max(100)
+          .describe("Number of top-level checklist items in the plan."),
+        steps_done: z.number().int().min(0).max(100)
+          .describe("Number of steps completed so far. 0 when the plan is fresh."),
+      },
+    },
+    async ({ summary, steps_total, steps_done }) => {
+      const sid = ctx.activeSessionId ?? getCallerSessionIdFromEnv();
+      if (!sid) {
+        return { content: [{ type: "text", text: "Not in a room; cannot update plan." }] };
+      }
+      const room = ctx.manager.ensureRoomSync(sid);
+      if (!room) {
+        return { content: [{ type: "text", text: "Not in a room; cannot update plan." }] };
+      }
+      room.updatePlan({ summary, steps_total, steps_done });
+      return {
+        content: [{ type: "text", text: `Plan: ${summary} (${steps_done}/${steps_total})` }],
+      };
+    }
+  );
+
+  mcp.registerTool(
+    "claim_territory",
+    {
+      description: CLAIM_TERRITORY_DESC,
+      inputSchema: {
+        globs: z.array(z.string().min(1)).min(1).max(20)
+          .describe("Gitignore-style glob patterns, relative to project root."),
+        purpose: z.string().min(1).max(200)
+          .describe("Short phrase describing the task."),
+      },
+    },
+    async ({ globs, purpose }) => {
+      const sid = ctx.activeSessionId ?? getCallerSessionIdFromEnv();
+      if (!sid) {
+        return { content: [{ type: "text", text: "Not in a room; cannot claim territory." }] };
+      }
+      const room = ctx.manager.ensureRoomSync(sid);
+      if (!room) {
+        return { content: [{ type: "text", text: "Not in a room; cannot claim territory." }] };
+      }
+      room.claimTerritory(globs, purpose);
+      return {
+        content: [{ type: "text", text: `Claimed territory: ${globs.join(", ")} (${purpose})` }],
+      };
+    }
+  );
+
+  mcp.registerTool(
+    "release_territory",
+    {
+      description: RELEASE_TERRITORY_DESC,
+      inputSchema: {},
+    },
+    async () => {
+      const sid = ctx.activeSessionId ?? getCallerSessionIdFromEnv();
+      if (!sid) {
+        return { content: [{ type: "text", text: "Not in a room; nothing to release." }] };
+      }
+      const room = ctx.manager.ensureRoomSync(sid);
+      if (!room) {
+        return { content: [{ type: "text", text: "Not in a room; nothing to release." }] };
+      }
+      room.releaseTerritory();
+      return { content: [{ type: "text", text: "Territory released." }] };
     }
   );
 

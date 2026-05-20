@@ -1,8 +1,10 @@
 // PostToolUse hook on Write|Edit|MultiEdit. Records the edit in our actor
-// state and refreshes the lock TTL on the touched files.
+// state, refreshes the lock TTL on the touched files, publishes a light
+// git refresh (no commits), and forwards the current plan-mode flag.
 
 import { resolve as resolvePath, isAbsolute } from "node:path";
-import { hookIpc, readStdinJson, detectBranch, warn } from "./_common.js";
+import { hookIpc, readStdinJson, detectBranch, inPlanMode, warn } from "./_common.js";
+import { readGitStateLight } from "../git-state.js";
 import type { ActionEvent } from "../shared-state.js";
 
 function absolutize(file: string, cwd: string): string {
@@ -65,6 +67,19 @@ async function main(): Promise<void> {
   if (files.length > 0) {
     await hookIpc("refresh_lock_ttl", { session_id: sessionId, files }, sessionId);
   }
+
+  // v1.1: publish a light git refresh and the plan-mode flag.
+  const git = readGitStateLight(cwd);
+  await hookIpc(
+    "update_my_git",
+    { session_id: sessionId, state: git, include_commits: false },
+    sessionId
+  );
+  await hookIpc(
+    "update_my_plan",
+    { session_id: sessionId, in_plan_mode: inPlanMode(input) },
+    sessionId
+  );
 }
 
 main().catch((e) => {

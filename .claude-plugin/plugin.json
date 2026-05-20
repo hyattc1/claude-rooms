@@ -1,6 +1,6 @@
 {
   "name": "claude-rooms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multiplayer Claude Code. Two or more developers each running their own Claude Code session, sharing live state of what their agents are doing, in real time.",
   "author": {
     "name": "Connor Hyatt"
@@ -15,6 +15,13 @@
       "title": "Actor name",
       "description": "Short identifier other teammates see for you in the room. Defaults to your git user.name, kebab-cased. Override here if you want something different.",
       "required": false
+    },
+    "share_prompts": {
+      "type": "boolean",
+      "title": "Share your prompts with teammates",
+      "description": "When true (default), the first 100 characters of each user prompt you send are visible to teammates in the room via the last_prompt field. Turn off if you want your prompts kept local.",
+      "required": false,
+      "default": true
     }
   },
   "mcpServers": {

@@ -122,18 +122,25 @@ async function stop(child, peer) {
   });
 }
 
-test("tools/list exposes read_room_state and update_my_focus", async () => {
+test("tools/list exposes the v1 + v1.1 tool set", async () => {
   const dir = uniqueDir();
   const { child, peer } = await bootMcp(dir);
   try {
     const r = await peer.rpc("tools/list", {});
     const names = r.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ["read_room_state", "update_my_focus"]);
+    assert.deepEqual(
+      names,
+      ["claim_territory", "read_room_state", "release_territory", "update_my_focus", "update_my_plan"]
+    );
     const readDesc = r.tools.find((t) => t.name === "read_room_state").description;
     assert.match(readDesc, /Returns the live state/);
     assert.match(readDesc, /Call this/);
     const focusDesc = r.tools.find((t) => t.name === "update_my_focus").description;
     assert.match(focusDesc, /short description of what you are currently working on/);
+    const planDesc = r.tools.find((t) => t.name === "update_my_plan").description;
+    assert.match(planDesc, /Share a compact summary/);
+    const claimDesc = r.tools.find((t) => t.name === "claim_territory").description;
+    assert.match(claimDesc, /Tell teammates which areas of the codebase/);
   } finally {
     await stop(child, peer);
   }

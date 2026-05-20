@@ -1,18 +1,15 @@
 // Stop hook: when the agent finishes a turn, snapshot the most recent
 // action into recent_actions so the next read_room_state call surfaces it.
-// In v1 we delegate the rotation to the MCP server via record_action; if
-// there is no last_action yet, this is a no-op.
+// v1.1: also publish a full git refresh (with commits) and the plan-mode flag.
 
-import { hookIpc, readStdinJson, warn } from "./_common.js";
+import { hookIpc, readStdinJson, inPlanMode, warn } from "./_common.js";
+import { readGitState } from "../git-state.js";
 
 async function main(): Promise<void> {
   const input = readStdinJson();
   const sessionId = input.session_id ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (!sessionId) return;
 
-  // Tell the MCP server we have finished a turn. The MCP server reads our
-  // last_action and rotates it into recent_actions. If last_action is null
-  // the rotation is a no-op.
   await hookIpc(
     "record_action",
     {
@@ -24,6 +21,20 @@ async function main(): Promise<void> {
         timestamp_ms: Date.now(),
       },
     },
+    sessionId
+  );
+
+  // v1.1: full git refresh (commits included; throttled MCP-side to 5s).
+  const cwd = input.cwd ?? process.cwd();
+  const git = readGitState(cwd, { includeCommits: true });
+  await hookIpc(
+    "update_my_git",
+    { session_id: sessionId, state: git, include_commits: true },
+    sessionId
+  );
+  await hookIpc(
+    "update_my_plan",
+    { session_id: sessionId, in_plan_mode: inPlanMode(input) },
     sessionId
   );
 }

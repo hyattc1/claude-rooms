@@ -1,15 +1,20 @@
 // PreToolUse hook on Write|Edit|MultiEdit. Synchronously checks shared
 // locks via IPC; denies with a structured JSON response if a teammate
-// holds the file, otherwise allows. Always fails open on any internal
-// error (claude-rooms must never block your edits because IT is broken).
+// holds the file, otherwise allows. v1.1: when allowing, also queries
+// teammate territory claims and appends a soft warning if the file is
+// inside a teammate's territory. Always fails open on any internal error.
 
 import { resolve as resolvePath, isAbsolute } from "node:path";
-import { hookIpc, readStdinJson, emitHookOutput, warn } from "./_common.js";
+import { hookIpc, readStdinJson, emitHookOutput, inPlanMode, warn } from "./_common.js";
 
 interface TryAcquireResp {
   ok: boolean;
   in_room?: boolean;
   held?: Array<{ file: string; actor: string }>;
+}
+
+interface TerritoryOverlapResp {
+  overlaps: Array<{ file: string; teammate: string; purpose: string }>;
 }
 
 /** Extract the file paths a tool call wants to touch.
@@ -58,14 +63,24 @@ function buildDenyOutput(held: Array<{ file: string; actor: string }>) {
   };
 }
 
-function buildAllowReminder() {
+function buildAllowReminder(
+  overlaps: Array<{ file: string; teammate: string; purpose: string }>
+) {
+  let body =
+    "claude-rooms file-edit coordination checked the shared locks before this edit. " +
+    "Consider calling read_room_state to stay aware of teammate activity.";
+  if (overlaps.length > 0) {
+    const overlapLines = overlaps.map(
+      (o) =>
+        `Note: ${o.file} is in ${o.teammate}'s claimed territory ("${o.purpose}"). ` +
+        "Your edit is proceeding because no lock is held, but consider whether to coordinate."
+    );
+    body += "\n" + overlapLines.join("\n");
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      additionalContext:
-        "claude-rooms file-edit coordination checked the shared locks before this edit. " +
-        "If a teammate had been editing this file, you would have been blocked. " +
-        "Consider calling read_room_state if you have not recently, to stay aware of teammate activity.",
+      additionalContext: body,
     },
   };
 }
@@ -79,6 +94,14 @@ async function main(): Promise<void> {
   const files = extractFiles(input.tool_input as Record<string, unknown> | undefined, cwd);
   if (files.length === 0) return; // nothing to lock; allow
 
+  // Publish plan-mode flag in the background. Best-effort, do not block.
+  void hookIpc(
+    "update_my_plan",
+    { session_id: sessionId, in_plan_mode: inPlanMode(input) },
+    sessionId,
+    500
+  );
+
   const resp = await hookIpc<TryAcquireResp>(
     "try_acquire_locks",
     { session_id: sessionId, files },
@@ -87,7 +110,15 @@ async function main(): Promise<void> {
   if (!resp) return; // MCP unreachable; allow
   if (resp.in_room === false) return; // not in a room; allow
   if (resp.ok) {
-    emitHookOutput(buildAllowReminder());
+    // Lock acquired. Check for soft territory overlap and include in reminder.
+    const overlapResp = await hookIpc<TerritoryOverlapResp>(
+      "check_territory_overlap",
+      { session_id: sessionId, files },
+      sessionId,
+      800
+    );
+    const overlaps = overlapResp?.overlaps ?? [];
+    emitHookOutput(buildAllowReminder(overlaps));
     return;
   }
   if (resp.held && resp.held.length > 0) {
