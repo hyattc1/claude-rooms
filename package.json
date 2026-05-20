@@ -2,6 +2,7 @@
   "name": "claude-rooms",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Multiplayer Claude Code plugin runtime: MCP server, hooks, and slash command implementations.",
   "license": "MIT",
   "engines": {
@@ -10,7 +11,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
