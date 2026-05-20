@@ -15,6 +15,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import * as Y from "yjs";
 
 import { IpcServer } from "../ipc.js";
 import { readSessionState } from "../session-store.js";
@@ -23,9 +24,16 @@ import { Room, type ActorState, type ActionEvent, type RoomSnapshot } from "../s
 const SERVER_NAME = "claude-rooms";
 const SERVER_VERSION = "0.1.0";
 
+// Test mode is opt-in via env var. When set, the MCP server skips the
+// y-webrtc connection AND shares a single Y.Doc per room_code across all
+// sessions in the same MCP process. This lets two test sessions in the
+// same process exercise the cross-actor lock / state behaviour exactly as
+// real WebRTC-synced peers would.
+const TEST_MODE = process.env.CLAUDE_ROOMS_TEST_MODE === "1";
+
 class RoomManager {
   private rooms = new Map<string, Room>(); // keyed on session id
-  private connecting = new Map<string, Promise<Room | null>>();
+  private sharedDocs = new Map<string, Y.Doc>(); // test-mode: room_code -> Y.Doc
 
   ensureRoomSync(sessionId: string): Room | null {
     const ss = readSessionState(sessionId);
@@ -36,8 +44,16 @@ class RoomManager {
     const existing = this.rooms.get(sessionId);
     if (existing && existing.roomCode === ss.room_code) return existing;
     if (existing) this.removeRoom(sessionId);
-    const room = new Room(ss.room_code, ss.actor_name);
-    room.connect();
+    let ydoc: Y.Doc | undefined;
+    if (TEST_MODE) {
+      ydoc = this.sharedDocs.get(ss.room_code);
+      if (!ydoc) {
+        ydoc = new Y.Doc();
+        this.sharedDocs.set(ss.room_code, ydoc);
+      }
+    }
+    const room = new Room(ss.room_code, ss.actor_name, ydoc ? { ydoc } : {});
+    room.connect(TEST_MODE ? { testMode: true } : {});
     this.rooms.set(sessionId, room);
     return room;
   }
