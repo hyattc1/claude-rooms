@@ -19,9 +19,18 @@
     "share_prompts": {
       "type": "boolean",
       "title": "Share your prompts with teammates",
-      "description": "When true (default), the first 100 characters of each user prompt you send are visible to teammates in the room via the last_prompt field. Turn off if you want your prompts kept local.",
+      "description": "Share the first 100 characters of each prompt you send with teammates in the room. Default OFF. When enabled, your verbatim prompts will be visible to all teammates in any room you join. Only enable this if you are confident every prompt you type is safe to share.",
       "required": false,
-      "default": true
+      "default": false
+    },
+    "room_code_length": {
+      "type": "number",
+      "title": "Room code word count",
+      "description": "How many words to include in a generated room code. 4 is the safe default (~2.8 trillion combinations from the EFF Short Wordlist). Use shorter only on trusted local networks. Range 2-6.",
+      "required": false,
+      "default": 4,
+      "min": 2,
+      "max": 6
     }
   },
   "mcpServers": {

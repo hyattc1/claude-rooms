@@ -23,19 +23,25 @@ function wirePeers(a, b) {
   });
 }
 
-test("generateRoomCode produces a valid pronounceable code", () => {
+test("generateRoomCode produces a valid 4-word default code", () => {
   for (let i = 0; i < 50; i++) {
     const c = generateRoomCode();
     assert.ok(isValidRoomCode(c), `not valid: ${c}`);
-    assert.match(c, /^[a-z]+-[a-z]+$/);
+    // Default is 4 segments. Pattern allows 2..6 segments of 3-6 lowercase chars.
+    assert.match(c, /^([a-z]{3,6}-){3}[a-z]{3,6}$/);
   }
 });
 
 test("normalizeRoomCode lowercases and rejects junk", () => {
   assert.equal(normalizeRoomCode("KITE-FROG"), "kite-frog");
   assert.equal(normalizeRoomCode(" mint-anchor "), "mint-anchor");
+  assert.equal(normalizeRoomCode(" kite-frog-mint-anchor "), "kite-frog-mint-anchor");
   assert.equal(normalizeRoomCode("kite frog"), null);
-  assert.equal(normalizeRoomCode("kite-frog-extra"), null);
+  // 7 segments is over the max range of 6.
+  assert.equal(normalizeRoomCode("a-b-c-d-e-f-g"), null);
+  // 1-segment codes are not valid (need at least 2).
+  assert.equal(normalizeRoomCode("kite"), null);
+  // Words shorter than 3 chars are not allowed.
   assert.equal(normalizeRoomCode("k-frog"), null);
 });
 

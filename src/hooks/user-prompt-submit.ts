@@ -1,7 +1,10 @@
 // UserPromptSubmit hook: publishes a truncated copy of the user's prompt
 // so teammates' agents can see what each user is asking. Respects the
-// share_prompts userConfig flag (default true). Fails open like every
-// other hook.
+// share_prompts userConfig flag (default OFF in v1.1; users must opt in).
+// When share_prompts is toggled OFF mid-session, the next prompt clears
+// any previously stored last_prompt to null. Fails open like every other
+// hook. The Room boundary in the MCP server runs scrubSecrets on the text
+// before storage; this hook does not scrub locally to avoid double counting.
 
 import { hookIpc, readStdinJson, sharePromptsEnabled, warn } from "./_common.js";
 

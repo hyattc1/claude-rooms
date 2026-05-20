@@ -55,23 +55,75 @@ Inside the plugin, the agent also has these MCP tools:
 
 ## What v1.1 adds
 
-Four awareness signals that meaningfully deepen the multiplayer feel without adding external services or auth.
+Four awareness signals plus three fail-safe privacy defaults. No new external services. No new auth surface.
 
-- **Git state.** Each agent's `read_room_state` view now includes the teammate's repo, branch, short head, dirty flag, and last 5 commit subjects. `/rooms-status` lays it out per teammate. SessionStart context tags each teammate as "same branch as you, watch for conflicts", "same repo, different branch", or "different repo, probably independent work" based on a comparison with your own git state.
+Awareness:
+- **Git state.** `read_room_state` includes each teammate's repo, branch, short head, dirty flag, and last 5 commit subjects. `/rooms-status` lays it out per teammate. SessionStart context tags each teammate as "same branch as you, watch for conflicts", "same repo, different branch", or "different repo, probably independent work" based on a comparison with your own git state.
 - **Plan-mode awareness.** When the agent is in Claude Code's plan mode, claude-rooms detects it via `permission_mode === "plan"` in hook stdin and exposes it on the actor record. The agent can call the new `update_my_plan` tool to share a one-phrase plan summary and how many checklist steps it has finished. For small one-off tasks the field stays null, so the UI does not get noisy.
-- **Last user message preview.** A new `UserPromptSubmit` hook publishes the first 100 characters of each prompt so teammates can see the gist of what each user is asking. See the privacy note below for the opt-out.
-- **Territory declarations.** The soft coordination layer that sits above hard file locks. The agent calls `claim_territory(['src/api/users.*', 'tests/users.*'], 'add users endpoint')` at the start of substantial tasks. Teammates see the claim and route around it at the planning stage. The PreToolUse hook also adds a soft warning to its allow-branch additionalContext when an edit lands inside a teammate's territory (the edit still proceeds because there is no lock; the warning just nudges coordination). Claims auto-expire after 2 hours.
+- **Last user message preview.** The new `UserPromptSubmit` hook publishes the first 100 characters of each prompt so teammates can see the gist of what each user is asking. **Default OFF.** See the privacy section below for how to opt in.
+- **Territory declarations.** The soft coordination layer that sits above hard file locks. The agent calls `claim_territory(['src/api/users.*', 'tests/users.*'], 'add users endpoint')` at the start of substantial tasks. Teammates see the claim and route around it at the planning stage. The PreToolUse hook also adds a soft warning to its allow-branch additionalContext when an edit lands inside a teammate's territory (the edit still proceeds because there is no lock; the warning just nudges coordination). Claims auto-expire after 2 hours. Rate-limited to one claim per 30 seconds per actor.
+
+Privacy defaults:
+- **4-word room codes** (configurable 2-6 via `room_code_length`). Drawn from the EFF Short Wordlist (1295 entries). The 4-word default yields ~2.8 trillion combinations, large enough to defeat random brute force.
+- **Prompt sharing is off** by default. `last_prompt` stays null unless you set `share_prompts: true` in the plugin config. SessionStart prints a one-time hint per session reminding you the protection is on. `/rooms-status` shows a "disabled by default" line under "You".
+- **Auto-redaction of likely secrets** from every free-form string the plugin writes to shared state. Anthropic / OpenAI / GitHub / AWS / Slack tokens, JWTs, PEM private keys, and URL-embedded credentials are replaced with `[redacted]` before they reach the Y.Doc, regardless of whether prompt sharing is on. A per-session counter is published in shared state and surfaced in `/rooms-status` only when nonzero. A local-only audit log at `${CLAUDE_PLUGIN_DATA}/redactions-<session_id>.log` records which patterns fired (no matched text) so you can debug false positives.
 
 The Y.Doc schema bumps to version 2 with these fields. v1.0 clients can still join v1.1 rooms; their states show up without the new fields and v1.1 clients render them gracefully.
 
 ## Privacy and sharing
 
-Two things are visible to teammates in your room:
+**What is shared with teammates:**
 
-- **Metadata only.** Your repo name, branch, short SHA, dirty flag, focus, plan summary, territory globs, file paths, and last user prompt preview. No code contents.
-- **Prompts** are shared by default as a 100-character preview. Set `share_prompts` to `false` in the plugin's `userConfig` to disable; when off, your `last_prompt` field stays null and teammates see no preview.
+- Your file paths, branch name, commit titles, focus, plan summary, territory claims, last action.
+- All of the above are visible to anyone in your room.
+
+**What is NOT shared:**
+
+- The contents of your files.
+- Your verbatim prompts, unless you opt in via `share_prompts`. Default is OFF.
+- Anything that looks like an API key, token, or private key. The scrubber redacts those before they reach shared state.
+
+**What it means if someone joins your room (legitimately or not):**
+
+- They can see the metadata listed above.
+- They cannot read the contents of your files.
+- They cannot execute code on your machine.
+- They cannot impersonate you in commits or PRs.
+
+**How to stay safe:**
+
+- Default room codes are 4 words for a reason. Use shorter only on trusted local networks.
+- Treat room codes like passwords. Do not paste them in public channels.
+- The plugin redacts common credential patterns but cannot catch everything. Do not type secrets into prompts.
+- If the scrubber redacts something it should not have, check `${CLAUDE_PLUGIN_DATA}/redactions-<session_id>.log` for the pattern name that matched.
+
+**The threat model claude-rooms v1.x protects against:**
+
+- Random brute force of room codes (defeated by the 4-word default).
+- Accidental secret leakage in prompts and commits (mitigated by the scrubber, default-off prompt sharing, and the audit log).
+- Strangers stumbling into your room by mistyping a code (mitigated by code length).
+
+**The threat model claude-rooms v1.x does NOT protect against:**
+
+- An attacker who can observe traffic on the public signaling servers (`signaling.yjs.dev` and the two Heroku instances baked into y-webrtc). The signaling protocol exchanges room topics in the clear; a sufficiently motivated attacker can enumerate currently-active topics and try them. 4-word codes raise the cost of guessing but do not hide active rooms from the relay operator.
+- A determined attacker who obtains your room code by other means (over-the-shoulder, leaked Slack message, screen recording).
+- Insider threats from teammates you invited.
+- Network-level traffic analysis between peers.
+
+If your work requires protection against any of those, do not use v1.x. Wait for v2 which adds end-to-end encryption and an optional self-hosted signaling server (see the Roadmap below).
 
 claude-rooms still never sends file contents over the wire. Everything routes peer-to-peer through y-webrtc; even on TURN fallback only metadata transits the relay.
+
+## Roadmap (v2 candidates)
+
+The following will be considered for v2. None are committed to v1.x.
+
+- End-to-end encryption with a passphrase-derived shared key. Every Y.Doc update would be encrypted before it touches the signaling server or any peer.
+- Self-hosted signaling server option for teams that want to keep room topics off the public infrastructure.
+- Account-based access control (allowlist of public keys per room).
+- Audit log of who joined a room, with timestamps.
+- Persistent rooms with history.
+- Entropy-based secret detection on top of the existing pattern set.
 
 ## Known warts
 
@@ -82,9 +134,9 @@ claude-rooms still never sends file contents over the wire. Everything routes pe
 - **Mesh degrades past ~6 peers.** claude-rooms is built for pairs and small groups. Larger rooms will work technically, but the mesh topology is not optimised for them.
 - **TURN fallback for symmetric NATs.** About 5% of users on aggressive symmetric NATs will fall back to public TURN, which is slower and rate-limited.
 
-## Status and roadmap
+## Status
 
-This is v1.1 (`0.2.0` in `plugin.json`). Out of scope for v1.1 (see the "What v2 might add" section in [CLAUDE.md](./CLAUDE.md)): agent-to-agent ask inboxes, persistent rooms with history, per-actor curated state projections, web dashboard, self-hosted relay option, human-facing presence display in the terminal, GitHub API integration, test/build status sharing (v1.2 candidate), and a `/rooms-diagnose` bundle. Bug fixes bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
+This is v1.1 (`0.2.0` in `plugin.json`). The deferred-to-v2 list lives in the Roadmap section above; see [CLAUDE.md](./CLAUDE.md) for design rationale and the original v1 trade-off list. Bug fixes bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
 
 ## License
 

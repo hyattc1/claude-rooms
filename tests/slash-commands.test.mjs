@@ -76,14 +76,14 @@ test("create -> status -> leave roundtrip", async () => {
   try {
     const created = runCmd("rooms-create", [], env);
     assert.equal(created.status, 0, `stderr: ${created.stderr}`);
-    assert.match(created.stdout, /^Room: [a-z]+-[a-z]+/m, `stdout: ${created.stdout}`);
+    assert.match(created.stdout, /^Room: ([a-z]{3,6}-){3}[a-z]{3,6}/m, `stdout: ${created.stdout}`);
     assert.match(created.stdout, /joined as connor/);
 
     // session-store written
     const ssPath = join(dir, "sessions", `${sid}.json`);
     assert.ok(existsSync(ssPath));
     const ss = JSON.parse(readFileSync(ssPath, "utf8"));
-    assert.match(ss.room_code, /^[a-z]+-[a-z]+$/);
+    assert.match(ss.room_code, /^([a-z]{3,6}-){3}[a-z]{3,6}$/);
     const roomCode = ss.room_code;
     assert.equal(ss.actor_name, "connor");
 

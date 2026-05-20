@@ -1,5 +1,6 @@
 import { readSessionState } from "../session-store.js";
 import { readGitState } from "../git-state.js";
+import { sharePromptsEnabled } from "../hooks/_common.js";
 import { getSessionId, ipcCall, exitWith } from "./_common.js";
 
 interface GitView {
@@ -28,6 +29,7 @@ interface ActorView {
   plan?: PlanView | null;
   last_prompt?: { text: string; at_ms: number } | null;
   territory?: { globs: string[]; purpose: string } | null;
+  redactions_count?: number;
 }
 
 interface Snapshot {
@@ -60,24 +62,21 @@ function planLine(plan: PlanView | null | undefined): string | null {
   return null;
 }
 
-function actorBlock(a: ActorView, indent: string, isMe: boolean): string[] {
+function teammateBlock(a: ActorView): string[] {
   const lines: string[] = [];
-  if (isMe) {
-    const focusPart = a.focus ? `\n${indent}focus: ${a.focus}` : "";
-    lines.push(`${indent}${a.actor} (online)${gitSummary(a.git)}${focusPart}`.trimEnd());
-  } else {
-    const status = a.online ? "online" : "offline";
-    lines.push(`${indent}${a.actor} (${status})${gitSummary(a.git)}`);
+  const status = a.online ? "online" : "offline";
+  lines.push(`  ${a.actor} (${status})${gitSummary(a.git)}`);
+  const sub = "    ";
+  if (a.last_prompt && a.last_prompt.text) {
+    lines.push(`${sub}last prompt: "${a.last_prompt.text}"`);
   }
-  const sub = indent + "  ";
-  if (a.last_prompt && a.last_prompt.text) lines.push(`${sub}last prompt: "${a.last_prompt.text}"`);
-  if (!isMe && a.focus) lines.push(`${sub}focus: ${a.focus}`);
+  if (a.focus) lines.push(`${sub}focus: ${a.focus}`);
   const pl = planLine(a.plan);
   if (pl) lines.push(`${sub}${pl}`);
   if (a.territory && a.territory.globs.length > 0) {
     lines.push(`${sub}territory: ${a.territory.globs.join(", ")} (${a.territory.purpose})`);
   }
-  if (!isMe && a.last_action) {
+  if (a.last_action) {
     const fileBit = a.last_action.files && a.last_action.files[0]
       ? ` ${a.last_action.files[0]}`
       : (a.last_action.summary ? ` ${a.last_action.summary}` : "");
@@ -110,18 +109,15 @@ async function main(): Promise<void> {
       `MCP server not reachable; teammate state unavailable.`
     );
   }
+
   const s = resp.snapshot;
   const me = s.actors.find((a) => a.actor === s.me);
   const others = s.actors.filter((a) => a.actor !== s.me);
+
   const lines: string[] = [];
   lines.push(`Room: ${s.room_code}`);
-  if (me) {
-    lines.push(...actorBlock(me, "You: ".replace("You: ", "You: "), true).map((l, i) => i === 0 ? l : l));
-    // The block above prefixes the first line with "You: <name>".
-    // Rebuild more cleanly:
-  }
-  lines.length = 0;
-  lines.push(`Room: ${s.room_code}`);
+
+  // "You" block.
   if (me) {
     const focusPart = me.focus ? ` - focus: ${me.focus}` : "";
     lines.push(`You: ${s.me} (online)${gitSummary(me.git)}${focusPart}`);
@@ -130,19 +126,29 @@ async function main(): Promise<void> {
     if (me.territory && me.territory.globs.length > 0) {
       lines.push(`  territory: ${me.territory.globs.join(", ")} (${me.territory.purpose})`);
     }
+    // v1.1: privacy hint when prompt sharing is off (default).
+    if (!sharePromptsEnabled()) {
+      lines.push("  (prompt sharing disabled by default. Enable in plugin config to share prompts with teammates.)");
+    }
+    // v1.1: surface the redaction counter when nonzero so the protection is visible.
+    if (typeof me.redactions_count === "number" && me.redactions_count > 0) {
+      const n = me.redactions_count;
+      lines.push(`  ${n} likely secret${n === 1 ? "" : "s"} auto-redacted from your shared state this session.`);
+    }
   } else {
     lines.push(`You: ${s.me} (online)`);
   }
+
   lines.push("");
   if (others.length === 0) {
     lines.push("Teammates: none online.");
   } else {
     lines.push("Teammates:");
     for (const a of others) {
-      const block = actorBlock(a, "  ", false);
-      lines.push(...block);
+      lines.push(...teammateBlock(a));
     }
   }
+
   lines.push("");
   if (s.locks.length === 0) {
     lines.push("Locks held: none.");
@@ -152,10 +158,13 @@ async function main(): Promise<void> {
       lines.push(`  ${l.file} (${l.entry.actor})`);
     }
   }
+
   if (s.territory_overlap && s.territory_overlap.length > 0) {
     lines.push("");
     for (const o of s.territory_overlap) {
-      lines.push(`Warning: ${o.file} (you have recently edited) is in ${o.teammate}'s claimed territory ("${o.purpose}").`);
+      lines.push(
+        `Warning: ${o.file} (you have recently edited) is in ${o.teammate}'s claimed territory ("${o.purpose}").`
+      );
     }
   }
   exitWith(lines.join("\n"));

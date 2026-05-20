@@ -3,9 +3,45 @@
 // snapshot as additionalContext. If we are not in a room or MCP is
 // unreachable, fail open: emit no context.
 
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 import { readSessionState } from "../session-store.js";
-import { hookIpc, readStdinJson, emitHookOutput, inPlanMode, warn } from "./_common.js";
+import {
+  hookIpc,
+  readStdinJson,
+  emitHookOutput,
+  inPlanMode,
+  sharePromptsEnabled,
+  warn,
+} from "./_common.js";
 import { readGitState } from "../git-state.js";
+
+const SHARE_PROMPTS_HINT =
+  "Note: prompt sharing is disabled by default for privacy. Teammates do not see what you ask Claude. Set share_prompts: true in the plugin config if you want them to.";
+
+function pluginDataDir(): string {
+  return process.env.CLAUDE_PLUGIN_DATA ?? "";
+}
+
+function hintMarkerPath(sessionId: string): string {
+  return join(pluginDataDir(), "sessions", `${sessionId}.hint-shown`);
+}
+
+/** One-time per-session marker: if the file does not exist, returns true and
+ *  writes the marker. Subsequent calls for the same session return false. */
+function consumeFirstHintFlag(sessionId: string): boolean {
+  if (!pluginDataDir() || !sessionId) return false;
+  const p = hintMarkerPath(sessionId);
+  if (existsSync(p)) return false;
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, String(Date.now()), { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // ignore; better to skip the hint than crash
+  }
+  return true;
+}
 
 interface ActorView {
   actor: string;
@@ -157,16 +193,22 @@ async function main(): Promise<void> {
   );
 
   const resp = await hookIpc<GetStateResp>("get_state", { session_id: sessionId }, sessionId);
+  // Compute the optional first-session hint about share_prompts being off.
+  const hint = !sharePromptsEnabled() && consumeFirstHintFlag(sessionId)
+    ? `\n\n${SHARE_PROMPTS_HINT}`
+    : "";
+
   if (!resp || !resp.in_room || !resp.snapshot) {
     emitHookOutput({
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: `## Room: ${local.room_code}\nYou are in claude-rooms as ${local.actor_name}. Teammate state will appear once the MCP server connects. Call read_room_state during your turn for the latest.`,
+        additionalContext:
+          `## Room: ${local.room_code}\nYou are in claude-rooms as ${local.actor_name}. Teammate state will appear once the MCP server connects. Call read_room_state during your turn for the latest.${hint}`,
       },
     });
     return;
   }
-  const text = formatContext(resp.snapshot);
+  const text = formatContext(resp.snapshot) + hint;
   emitHookOutput({
     hookSpecificOutput: {
       hookEventName: "SessionStart",

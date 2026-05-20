@@ -59,7 +59,14 @@ class RoomManager {
         this.sharedDocs.set(ss.room_code, ydoc);
       }
     }
-    const room = new Room(ss.room_code, ss.actor_name, ydoc ? { ydoc } : {});
+    // v1.1: pass sessionId and dataDir so the Room can write the per-session
+    // redaction audit log when scrubSecrets fires.
+    const dataDir = process.env.CLAUDE_PLUGIN_DATA;
+    const room = new Room(ss.room_code, ss.actor_name, {
+      ...(ydoc ? { ydoc } : {}),
+      sessionId,
+      ...(dataDir ? { dataDir } : {}),
+    });
     room.connect(TEST_MODE ? { testMode: true } : {});
     this.rooms.set(sessionId, room);
     return room;
@@ -312,9 +319,9 @@ async function main(): Promise<void> {
     ({ session_id, globs, purpose, ttl_ms }) => {
       adopt(session_id);
       const room = ctx.manager.ensureRoomSync(session_id);
-      if (!room) return { claimed: false };
-      const claim = room.claimTerritory(globs ?? [], purpose ?? "", ttl_ms);
-      return { claimed: true, claim };
+      if (!room) return { claimed: false, reason: "not-in-room" as const };
+      // Returns either {claimed: true, claim} or {claimed: false, reason: "rate-limited", retry_after_ms}.
+      return room.claimTerritory(globs ?? [], purpose ?? "", ttl_ms);
     }
   );
 
@@ -454,7 +461,16 @@ async function main(): Promise<void> {
       if (!room) {
         return { content: [{ type: "text", text: "Not in a room; cannot claim territory." }] };
       }
-      room.claimTerritory(globs, purpose);
+      const result = room.claimTerritory(globs, purpose);
+      if (!result.claimed) {
+        const retry = Math.ceil((result.retry_after_ms ?? 0) / 1000);
+        return {
+          content: [{
+            type: "text",
+            text: `Territory claim rate-limited (one claim per 30s per actor). Try again in ${retry}s.`,
+          }],
+        };
+      }
       return {
         content: [{ type: "text", text: `Claimed territory: ${globs.join(", ")} (${purpose})` }],
       };

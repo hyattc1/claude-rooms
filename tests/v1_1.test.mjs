@@ -393,18 +393,19 @@ test("PreToolUse lock-deny still wins over territory overlap", async () => {
 
 // ---- 5. UserPromptSubmit hook ----
 
-test("user-prompt-submit truncates long prompts to 100 chars + ellipsis", async () => {
+test("user-prompt-submit truncates long prompts to 100 chars + ellipsis (with share_prompts explicitly on)", async () => {
   const dir = uniqueDir();
   const child = await bootMcp(dir);
   try {
     const sid = "v11-ups";
     seedSession(dir, sid, "ups-room", "connor");
     const long = "x".repeat(300);
+    // share_prompts now defaults OFF in v1.1; explicitly opt in for this test.
     const r = runHook("user-prompt-submit", {
       session_id: sid,
       hook_event_name: "UserPromptSubmit",
       prompt: long,
-    }, { CLAUDE_PLUGIN_DATA: dir });
+    }, { CLAUDE_PLUGIN_DATA: dir, CLAUDE_PLUGIN_OPTION_SHARE_PROMPTS: "true" });
     assert.equal(r.status, 0);
     await new Promise((res) => setTimeout(res, 200));
     const c = await ipc(dir);

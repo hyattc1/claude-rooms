@@ -63,4 +63,10 @@ export function clearSessionState(sessionId: string): void {
       // ignore
     }
   }
+  // v1.1: also clear the SessionStart one-time-hint marker so the next
+  // session in a new room starts fresh.
+  const hintMarker = join(sessionsDir(), `${sessionId}.hint-shown`);
+  if (existsSync(hintMarker)) {
+    try { unlinkSync(hintMarker); } catch { /* ignore */ }
+  }
 }

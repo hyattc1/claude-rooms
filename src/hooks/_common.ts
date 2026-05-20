@@ -26,13 +26,14 @@ export function inPlanMode(input: HookInput): boolean {
   return input.permission_mode === "plan";
 }
 
-/** Returns true when share_prompts is explicitly disabled by the user. */
+/** Returns true when share_prompts is explicitly enabled by the user.
+ *  Default is OFF: anything other than an affirmative value disables sharing.
+ *  Affirmative values: "true", "1", "yes", "on" (case-insensitive). */
 export function sharePromptsEnabled(): boolean {
   const v = process.env.CLAUDE_PLUGIN_OPTION_SHARE_PROMPTS;
-  if (v == null) return true; // default true
+  if (v == null) return false; // default OFF
   const s = String(v).trim().toLowerCase();
-  if (s === "" || s === "false" || s === "0" || s === "no" || s === "off") return false;
-  return true;
+  return s === "true" || s === "1" || s === "yes" || s === "on";
 }
 
 /** Read the hook's stdin JSON. Returns an empty object on any error. */

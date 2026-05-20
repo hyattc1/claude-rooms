@@ -70,6 +70,11 @@ export interface ActorState {
   git?: GitState | null;
   plan?: PlanState | null;
   last_prompt?: LastPromptState | null;
+  /** Count of likely-secret matches that the scrubber has redacted from
+   *  this actor's free-form fields during the session. Surfaced by
+   *  /rooms-status only when > 0 so the protection is visible without
+   *  nagging on every status print. */
+  redactions_count?: number;
 }
 
 /** Snapshot-only: territory is stored in a separate Y.Map so its TTL can be
@@ -117,10 +122,27 @@ export interface TryAcquireResult {
 }
 
 import { findOverlaps } from "./territory.js";
+import { scrubSecrets, type ScrubResult } from "./scrub.js";
+import { appendAuditEntry } from "./audit.js";
+
+export const TERRITORY_CLAIM_RATE_LIMIT_MS = 30 * 1000;
+
+export interface ClaimResult {
+  claimed: boolean;
+  claim?: TerritoryClaim;
+  /** Set when `claimed` is false because the actor is in the rate-limit window. */
+  reason?: "rate-limited";
+  /** Milliseconds until the next claim is allowed. */
+  retry_after_ms?: number;
+}
 
 export class Room {
   readonly roomCode: string;
   readonly me: string;
+  /** Optional Claude Code session id, used to scope the audit log file. */
+  readonly sessionId: string | undefined;
+  /** Optional CLAUDE_PLUGIN_DATA, used as the audit log root. */
+  readonly dataDir: string | undefined;
   private ydoc: Y.Doc;
   private provider: WebrtcProvider | null = null;
   private awareness: Awareness | null = null;
@@ -135,11 +157,24 @@ export class Room {
   private lockTtlMs: number;
   /** Most-recent full git refresh times per actor, for the 5s throttle. */
   private lastFullGitRefreshMs = 0;
+  /** Most-recent territory claim time (per this actor), for the 30s rate limit. */
+  private lastTerritoryClaimMs = 0;
 
-  constructor(roomCode: string, me: string, opts: { lockTtlMs?: number; ydoc?: Y.Doc } = {}) {
+  constructor(
+    roomCode: string,
+    me: string,
+    opts: {
+      lockTtlMs?: number;
+      ydoc?: Y.Doc;
+      sessionId?: string;
+      dataDir?: string;
+    } = {}
+  ) {
     this.roomCode = roomCode;
     this.me = me;
     this.lockTtlMs = opts.lockTtlMs ?? DEFAULT_LOCK_TTL_MS;
+    this.sessionId = opts.sessionId;
+    this.dataDir = opts.dataDir;
     this.ydoc = opts.ydoc ?? new Y.Doc();
     this.actors = this.ydoc.getMap<ActorState>("actors");
     this.locks = this.ydoc.getMap<LockEntry>("locks");
@@ -202,6 +237,36 @@ export class Room {
     this.ydoc.transact(() => {
       this.actors.set(this.me, initial);
     });
+  }
+
+  // ---- Secret scrubbing helpers (v1.1 security) ----
+
+  /** Scrub a single free-form string. Returns the scrubbed value and
+   *  audit metadata; the caller is responsible for storing the scrubbed
+   *  value and incrementing `actor.redactions_count` inside its transaction. */
+  private scrubField(fieldName: string, value: string | null | undefined): {
+    value: string | null | undefined;
+    result: ScrubResult;
+  } {
+    if (typeof value !== "string" || value === "") {
+      return { value, result: { scrubbed: typeof value === "string" ? value : "", redactedCount: 0, redactionsByPattern: {} } };
+    }
+    const result = scrubSecrets(value);
+    if (result.redactedCount > 0 && this.dataDir && this.sessionId) {
+      appendAuditEntry(this.dataDir, this.sessionId, {
+        field: fieldName,
+        patterns: result.redactionsByPattern,
+        input_len: value.length,
+        redacted_count: result.redactedCount,
+      });
+    }
+    return { value: result.scrubbed, result };
+  }
+
+  /** Increment `actor.redactions_count` by N. Must be called inside a transaction. */
+  private bumpRedactions(state: ActorState, by: number): ActorState {
+    if (by <= 0) return state;
+    return { ...state, redactions_count: (state.redactions_count ?? 0) + by };
   }
 
   /** Map awareness clientIDs to actor names so we can reap on disconnect. */
@@ -299,18 +364,33 @@ export class Room {
     return now - claim.claimed_at_ms > claim.ttl_ms;
   }
 
-  /** Replace this actor's territory claim. */
-  claimTerritory(globs: string[], purpose: string, ttlMs = DEFAULT_TERRITORY_TTL_MS): TerritoryClaim {
+  /** Replace this actor's territory claim. Rate-limited to one claim per 30s
+   *  per actor; excess calls return {claimed: false, reason: "rate-limited"}. */
+  claimTerritory(globs: string[], purpose: string, ttlMs = DEFAULT_TERRITORY_TTL_MS): ClaimResult {
+    const now = Date.now();
+    if (now - this.lastTerritoryClaimMs < TERRITORY_CLAIM_RATE_LIMIT_MS) {
+      const retry = TERRITORY_CLAIM_RATE_LIMIT_MS - (now - this.lastTerritoryClaimMs);
+      return { claimed: false, reason: "rate-limited", retry_after_ms: retry };
+    }
+    // Scrub the purpose before storage.
+    const truncated = (purpose ?? "").slice(0, 200);
+    const r = this.scrubField("territory.purpose", truncated);
+    const scrubbedPurpose = (r.value as string) ?? "";
     const claim: TerritoryClaim = {
       globs: [...globs],
-      purpose: purpose.slice(0, 200),
-      claimed_at_ms: Date.now(),
+      purpose: scrubbedPurpose,
+      claimed_at_ms: now,
       ttl_ms: ttlMs,
     };
     this.ydoc.transact(() => {
       this.territories.set(this.me, claim);
+      if (r.result.redactedCount > 0) {
+        const cur = this.actors.get(this.me) ?? this.makeInitialSelf();
+        this.actors.set(this.me, this.bumpRedactions(cur, r.result.redactedCount));
+      }
     });
-    return claim;
+    this.lastTerritoryClaimMs = now;
+    return { claimed: true, claim };
   }
 
   releaseTerritory(): void {
@@ -344,6 +424,15 @@ export class Room {
   /** Update this actor's plan record. Called by both hooks (in_plan_mode
    *  signal from permission_mode) and by the update_my_plan MCP tool. */
   updatePlan(patch: Partial<PlanState>): void {
+    // Scrub the summary before storage, if present.
+    let scrubbedSummary = patch.summary;
+    let redactions = 0;
+    if (typeof patch.summary === "string") {
+      const r = this.scrubField("plan.summary", patch.summary);
+      scrubbedSummary = r.value as string;
+      redactions += r.result.redactedCount;
+    }
+
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me);
       const existing = cur?.plan ?? null;
@@ -354,8 +443,8 @@ export class Room {
         steps_done: existing?.steps_done ?? 0,
         updated_at_ms: Date.now(),
         ...patch,
+        ...(typeof scrubbedSummary === "string" ? { summary: scrubbedSummary } : {}),
       };
-      // If nothing meaningful is set, leave plan null to avoid empty UI rows.
       const meaningful = next.in_plan_mode || next.summary.length > 0
         || next.steps_total > 0 || next.steps_done > 0;
       const merged: ActorState = {
@@ -363,7 +452,7 @@ export class Room {
         plan: meaningful ? next : null,
         last_heartbeat_ms: Date.now(),
       };
-      this.actors.set(this.me, merged);
+      this.actors.set(this.me, this.bumpRedactions(merged, redactions));
     });
   }
 
@@ -371,51 +460,72 @@ export class Room {
 
   /** Merge a git refresh from this actor's hooks. If the supplied state is
    *  light (no commits) and `head` matches a previously cached entry, the
-   *  cached commits are preserved. Throttled to one full refresh per 5s. */
+   *  cached commits are preserved. Throttled to one full refresh per 5s.
+   *  v1.1: commit subjects are scrubbed for secrets before storage. */
   mergeGitState(input: GitState | null, opts: { includeCommits: boolean }): void {
     const now = Date.now();
     if (opts.includeCommits) {
       if (now - this.lastFullGitRefreshMs < GIT_FULL_REFRESH_MIN_INTERVAL_MS) {
-        // Throttle: degrade to a light refresh.
         opts = { includeCommits: false };
       } else {
         this.lastFullGitRefreshMs = now;
       }
     }
+
+    let scrubbedInput = input;
+    let redactions = 0;
+    if (input && Array.isArray(input.recent_commits) && input.recent_commits.length > 0) {
+      const newCommits: string[] = [];
+      for (const commit of input.recent_commits) {
+        if (typeof commit === "string") {
+          const r = this.scrubField("git.commit", commit);
+          newCommits.push(r.value as string);
+          redactions += r.result.redactedCount;
+        } else {
+          newCommits.push("");
+        }
+      }
+      scrubbedInput = { ...input, recent_commits: newCommits };
+    }
+
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me) ?? this.makeInitialSelf();
-      let nextGit: GitState | null = input;
-      if (input && !opts.includeCommits) {
-        // Preserve cached commits if HEAD did not change.
+      let nextGit: GitState | null = scrubbedInput;
+      if (scrubbedInput && !opts.includeCommits) {
         const prev = cur.git ?? null;
-        if (prev && prev.head === input.head) {
-          nextGit = { ...input, recent_commits: prev.recent_commits };
+        if (prev && prev.head === scrubbedInput.head) {
+          nextGit = { ...scrubbedInput, recent_commits: prev.recent_commits };
         } else {
-          nextGit = { ...input, recent_commits: [] };
+          nextGit = { ...scrubbedInput, recent_commits: [] };
         }
       }
       const merged: ActorState = {
         ...cur,
         git: nextGit,
-        // Also mirror branch into the existing top-level branch field so old
-        // v1 clients see something useful.
         branch: nextGit?.branch ?? cur.branch,
         last_heartbeat_ms: Date.now(),
       };
-      this.actors.set(this.me, merged);
+      this.actors.set(this.me, this.bumpRedactions(merged, redactions));
     });
   }
 
   // ---- Last prompt ----
 
   setLastPrompt(prompt: LastPromptState | null): void {
+    let scrubbed: LastPromptState | null = prompt;
+    let redactions = 0;
+    if (prompt && typeof prompt.text === "string") {
+      const r = this.scrubField("last_prompt.text", prompt.text);
+      scrubbed = { text: (r.value as string) ?? "", at_ms: prompt.at_ms };
+      redactions += r.result.redactedCount;
+    }
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me) ?? this.makeInitialSelf();
-      this.actors.set(this.me, {
+      this.actors.set(this.me, this.bumpRedactions({
         ...cur,
-        last_prompt: prompt,
+        last_prompt: scrubbed,
         last_heartbeat_ms: Date.now(),
-      });
+      }, redactions));
     });
   }
 
@@ -450,22 +560,34 @@ export class Room {
     if (!this.pendingPatch) return;
     const patch = this.pendingPatch;
     this.pendingPatch = null;
+
+    // Scrub the free-form fields BEFORE the transaction, so audit-log I/O
+    // does not stretch out the transaction. The transaction below uses the
+    // scrubbed values and increments redactions_count atomically.
+    let scrubbedFocus = patch.focus;
+    let scrubbedLastAction = patch.last_action;
+    let redactions = 0;
+
+    if (typeof patch.focus === "string") {
+      const r = this.scrubField("focus", patch.focus);
+      scrubbedFocus = r.value as string;
+      redactions += r.result.redactedCount;
+    }
+    if (patch.last_action && typeof patch.last_action.summary === "string") {
+      const r = this.scrubField("last_action.summary", patch.last_action.summary);
+      scrubbedLastAction = { ...patch.last_action, summary: r.value as string };
+      redactions += r.result.redactedCount;
+    }
+
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me);
-      const base: ActorState = cur ?? {
-        actor: this.me,
-        focus: "",
-        branch: "",
-        files_open: [],
-        last_action: null,
-        recent_actions: [],
-        blockers: [],
-        online: true,
-        last_heartbeat_ms: Date.now(),
-      };
+      const base: ActorState = cur ?? this.makeInitialSelf();
       const merged: ActorState = {
         ...base,
         ...patch,
+        // Apply scrubbed overrides last so a patch can never reintroduce a secret.
+        ...(typeof scrubbedFocus === "string" ? { focus: scrubbedFocus } : {}),
+        ...(scrubbedLastAction ? { last_action: scrubbedLastAction } : {}),
         actor: this.me, // never let a patch rename us
         last_heartbeat_ms: Date.now(),
       };
@@ -473,16 +595,37 @@ export class Room {
       if (merged.recent_actions.length > RECENT_ACTIONS_CAP) {
         merged.recent_actions = merged.recent_actions.slice(-RECENT_ACTIONS_CAP);
       }
-      this.actors.set(this.me, merged);
+      this.actors.set(this.me, this.bumpRedactions(merged, redactions));
     });
   }
 
   /** Append a new last_action and rotate the previous one into recent_actions.
    *  Bypasses the setMyState debounce so each action is recorded immediately;
-   *  recordAction is called on Stop, not on every tool call, so it is not noisy. */
+   *  recordAction is called on Stop, not on every tool call, so it is not noisy.
+   *  v1.1: action.summary and any string-valued action.details fields are
+   *  scrubbed for secrets before storage. */
   recordAction(action: ActionEvent): void {
-    // Flush any pending debounced state so we read the freshest values.
     this.flushMyState();
+    let redactions = 0;
+    let nextAction: ActionEvent = action;
+    if (typeof action.summary === "string") {
+      const r = this.scrubField("recent_action.summary", action.summary);
+      nextAction = { ...nextAction, summary: r.value as string };
+      redactions += r.result.redactedCount;
+    }
+    if (action.details && typeof action.details === "object") {
+      const scrubbedDetails: Record<string, unknown> = { ...action.details };
+      for (const k of Object.keys(scrubbedDetails)) {
+        const v = scrubbedDetails[k];
+        if (typeof v === "string") {
+          const r = this.scrubField(`recent_action.details.${k}`, v);
+          scrubbedDetails[k] = r.value;
+          redactions += r.result.redactedCount;
+        }
+      }
+      nextAction = { ...nextAction, details: scrubbedDetails };
+    }
+
     this.ydoc.transact(() => {
       const cur = this.actors.get(this.me);
       const recent_actions = cur ? [...cur.recent_actions] : [];
@@ -492,23 +635,13 @@ export class Room {
           recent_actions.splice(0, recent_actions.length - RECENT_ACTIONS_CAP);
         }
       }
-      const base: ActorState = cur ?? {
-        actor: this.me,
-        focus: "",
-        branch: "",
-        files_open: [],
-        last_action: null,
-        recent_actions: [],
-        blockers: [],
-        online: true,
-        last_heartbeat_ms: Date.now(),
-      };
-      this.actors.set(this.me, {
+      const base: ActorState = cur ?? this.makeInitialSelf();
+      this.actors.set(this.me, this.bumpRedactions({
         ...base,
-        last_action: action,
+        last_action: nextAction,
         recent_actions,
         last_heartbeat_ms: Date.now(),
-      });
+      }, redactions));
     });
   }
 
