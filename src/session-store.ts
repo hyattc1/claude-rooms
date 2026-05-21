@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from "
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+import { clearHints } from "./hints.js";
+
 // Per-session room membership, keyed on the Claude Code session id.
 // Slash commands write this file; hooks and the MCP server read it to decide
 // whether this session is currently in a room.
@@ -63,10 +65,7 @@ export function clearSessionState(sessionId: string): void {
       // ignore
     }
   }
-  // v1.1: also clear the SessionStart one-time-hint marker so the next
-  // session in a new room starts fresh.
-  const hintMarker = join(sessionsDir(), `${sessionId}.hint-shown`);
-  if (existsSync(hintMarker)) {
-    try { unlinkSync(hintMarker); } catch { /* ignore */ }
-  }
+  // Wipe one-time hint state so the next session in a new room starts fresh.
+  // clearHints() also cleans up the legacy v1.1-era .hint-shown marker.
+  clearHints(sessionId);
 }

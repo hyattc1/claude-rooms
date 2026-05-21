@@ -1,6 +1,8 @@
 import { readSessionState } from "../session-store.js";
 import { readGitState } from "../git-state.js";
 import { sharePromptsEnabled } from "../hooks/_common.js";
+import { resolveIceServers, summarizeIceServers } from "../ice-servers.js";
+import { isWSL, wslNetworkingMode } from "../wsl-detect.js";
 import { getSessionId, ipcCall, exitWith } from "./_common.js";
 
 interface GitView {
@@ -125,6 +127,12 @@ async function main(): Promise<void> {
     if (pl) lines.push(`  ${pl}`);
     if (me.territory && me.territory.globs.length > 0) {
       lines.push(`  territory: ${me.territory.globs.join(", ")} (${me.territory.purpose})`);
+    }
+    // v1.2: one-line ICE summary so users can see how their WebRTC is wired up.
+    lines.push(`  ICE: ${summarizeIceServers(resolveIceServers())}`);
+    // v1.2: WSL2 NAT warning. Mirrored mode is silent (works fine).
+    if (isWSL() && wslNetworkingMode() === "nat") {
+      lines.push("  WSL2 NAT mode detected: peer-to-peer may use TURN relay. See /claude-rooms:rooms-doctor for setup help.");
     }
     // v1.1: privacy hint when prompt sharing is off (default).
     if (!sharePromptsEnabled()) {

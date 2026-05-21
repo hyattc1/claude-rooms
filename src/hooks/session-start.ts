@@ -3,9 +3,6 @@
 // snapshot as additionalContext. If we are not in a room or MCP is
 // unreachable, fail open: emit no context.
 
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-
 import { readSessionState } from "../session-store.js";
 import {
   hookIpc,
@@ -16,31 +13,30 @@ import {
   warn,
 } from "./_common.js";
 import { readGitState } from "../git-state.js";
+import { hasHintBeenShown, markHintShown } from "../hints.js";
+import { isWSL, wslNetworkingMode } from "../wsl-detect.js";
 
 const SHARE_PROMPTS_HINT =
   "Note: prompt sharing is disabled by default for privacy. Teammates do not see what you ask Claude. Set share_prompts: true in the plugin config if you want them to.";
 
-function pluginDataDir(): string {
-  return process.env.CLAUDE_PLUGIN_DATA ?? "";
-}
+const WSL2_NAT_HINT =
+  "Note: you are running in WSL2 with NAT networking. Direct WebRTC peer-to-peer to teammates may fail; the plugin will fall back to a public TURN relay (DTLS-encrypted bytes only). For a faster, no-relay connection, enable WSL2 mirrored mode on Windows 11 22H2+. See the README \"Running on WSL2\" section for the setup, or run /claude-rooms:rooms-doctor for a diagnostic.";
 
-function hintMarkerPath(sessionId: string): string {
-  return join(pluginDataDir(), "sessions", `${sessionId}.hint-shown`);
-}
-
-/** One-time per-session marker: if the file does not exist, returns true and
- *  writes the marker. Subsequent calls for the same session return false. */
-function consumeFirstHintFlag(sessionId: string): boolean {
-  if (!pluginDataDir() || !sessionId) return false;
-  const p = hintMarkerPath(sessionId);
-  if (existsSync(p)) return false;
-  try {
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, String(Date.now()), { encoding: "utf8", mode: 0o600 });
-  } catch {
-    // ignore; better to skip the hint than crash
+/** Compute SessionStart hint paragraphs that should fire for this session.
+ *  Each returned hint is appended to additionalContext and marked as shown so
+ *  it does not repeat on subsequent SessionStart events in the same session. */
+function buildSessionStartHints(sessionId: string): string {
+  if (!sessionId) return "";
+  const parts: string[] = [];
+  if (!sharePromptsEnabled() && !hasHintBeenShown(sessionId, "share-prompts")) {
+    parts.push(SHARE_PROMPTS_HINT);
+    markHintShown(sessionId, "share-prompts");
   }
-  return true;
+  if (isWSL() && wslNetworkingMode() === "nat" && !hasHintBeenShown(sessionId, "wsl-nat")) {
+    parts.push(WSL2_NAT_HINT);
+    markHintShown(sessionId, "wsl-nat");
+  }
+  return parts.length === 0 ? "" : "\n\n" + parts.join("\n\n");
 }
 
 interface ActorView {
@@ -193,10 +189,8 @@ async function main(): Promise<void> {
   );
 
   const resp = await hookIpc<GetStateResp>("get_state", { session_id: sessionId }, sessionId);
-  // Compute the optional first-session hint about share_prompts being off.
-  const hint = !sharePromptsEnabled() && consumeFirstHintFlag(sessionId)
-    ? `\n\n${SHARE_PROMPTS_HINT}`
-    : "";
+  // Compute any one-time hints (share_prompts default, WSL2 NAT) for this session.
+  const hint = buildSessionStartHints(sessionId);
 
   if (!resp || !resp.in_room || !resp.snapshot) {
     emitHookOutput({

@@ -18,6 +18,7 @@ import { Awareness } from "y-protocols/awareness";
 // Node WebRTC backend. y-webrtc/simple-peer use the browser WebRTC API by
 // default; in Node we must inject @roamhq/wrtc via peerOpts.
 import wrtc from "@roamhq/wrtc";
+import { resolveIceServers, resolveSignalingServers, type IceServer } from "./ice-servers.js";
 
 export interface ActionEvent {
   type: string;
@@ -209,11 +210,12 @@ export class Room {
       this.ensureSelfActorRecord();
       return;
     }
-    this.provider = new WebrtcProvider(this.roomCode, this.ydoc, {
-      signaling: opts.signaling,
-      peerOpts: { wrtc },
-      filterBcConns: false,
-    } as ConstructorParameters<typeof WebrtcProvider>[2]);
+    const providerOpts = buildProviderOpts(opts.signaling);
+    this.provider = new WebrtcProvider(
+      this.roomCode,
+      this.ydoc,
+      providerOpts as ConstructorParameters<typeof WebrtcProvider>[2]
+    );
     this.awareness = this.provider.awareness;
     this.awareness.setLocalStateField("actor", this.me);
     this.wireAwarenessLockReaper();
@@ -785,4 +787,28 @@ export class Room {
   get _ydocForTests(): Y.Doc {
     return this.ydoc;
   }
+}
+
+export interface ProviderOpts {
+  signaling?: string[];
+  peerOpts: {
+    wrtc: unknown;
+    config: { iceServers: readonly IceServer[] };
+  };
+  filterBcConns: boolean;
+}
+
+/** Build the WebrtcProvider options object. Exported so tests can verify the
+ *  ICE-server resolution path without spinning up a real peer connection.
+ *  callerSignaling, if provided, takes precedence over the userConfig override. */
+export function buildProviderOpts(callerSignaling?: string[]): ProviderOpts {
+  const iceServers = resolveIceServers();
+  const userSignaling = resolveSignalingServers();
+  const signaling = callerSignaling ?? userSignaling ?? undefined;
+  const opts: ProviderOpts = {
+    peerOpts: { wrtc, config: { iceServers } },
+    filterBcConns: false,
+  };
+  if (signaling) opts.signaling = signaling;
+  return opts;
 }

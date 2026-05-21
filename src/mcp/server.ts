@@ -29,7 +29,7 @@ import {
 } from "../shared-state.js";
 
 const SERVER_NAME = "claude-rooms";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.3.0";
 
 // Test mode is opt-in via env var. When set, the MCP server skips the
 // y-webrtc connection AND shares a single Y.Doc per room_code across all
