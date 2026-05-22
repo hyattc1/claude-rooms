@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     lines.push(`  ICE: ${summarizeIceServers(resolveIceServers())}`);
     // v1.2: WSL2 NAT warning. Mirrored mode is silent (works fine).
     if (isWSL() && wslNetworkingMode() === "nat") {
-      lines.push("  WSL2 NAT mode detected: peer-to-peer may use TURN relay. See /claude-rooms:rooms-doctor for setup help.");
+      lines.push("  WSL2 NAT mode detected: cross-machine sync requires mirrored mode or a working TURN. Run /claude-rooms:rooms-doctor for the diagnostic.");
     }
     // v1.1: privacy hint when prompt sharing is off (default).
     if (!sharePromptsEnabled()) {

@@ -56,12 +56,13 @@ Inside the plugin, the agent also has these MCP tools:
 
 ## What v1.2 adds
 
-WebRTC peer-to-peer now works for WSL2 users out of the box, without any subscription or account on anyone's side. Two layered fixes:
+Better WSL2 ergonomics and a real diagnostic. Three things:
 
-- **Default TURN fallback.** When direct peer-to-peer cannot be established (WSL2 default NAT, symmetric NATs, restrictive corp firewalls), the plugin transparently falls back to relaying through a free public TURN endpoint (Open Relay on ports 80/443, plus TLS on 443). The relay sees only DTLS-encrypted bytes; it cannot read Y.Doc contents. Override via the new `turn_servers` userConfig if you run your own coturn, or set `disable_default_turn: true` to require direct connections for stricter privacy.
-- **WSL2 mirrored-mode documentation and detection.** On Windows 11 22H2+, enabling WSL2 mirrored networking gives direct peer-to-peer with no relay (faster, more private). The new `/claude-rooms:rooms-doctor` command tells you whether you're in NAT mode and what to change to fix it, and SessionStart prints a one-time hint to nudge WSL2-NAT users toward mirrored mode.
+- **WSL2 mirrored-mode documentation and detection.** Default WSL2 NAT mode blocks the inbound UDP that WebRTC needs, so cross-machine sync does not work from there. On Windows 11 22H2+, enabling WSL2 mirrored networking fixes this completely (direct peer-to-peer, no relay). The plugin detects which mode you are in and SessionStart prints a one-time hint to nudge NAT-mode users toward mirrored mode. See the "Running on WSL2" section below.
+- **New `/claude-rooms:rooms-doctor` slash command.** Prints a diagnostic page (WSL status, ICE config, MCP socket discovery, recommended next step) and runs a **live ICE candidate probe** against your current config. Tells you in seconds whether your TURN configuration actually produces a `relay` candidate, instead of leaving you to guess from "the room is empty".
+- **TURN and signaling userConfig overrides.** `turn_servers` and `signaling_servers` accept JSON arrays so you can plug in your own coturn instance, Cloudflare TURN with HMAC, a paid Metered.ca tier, or alternate signaling servers if you operate them. Default config is STUN-only; an honest TURN fallback for arbitrary users requires either a subscription somebody pays for or a self-hosted relay, and we will not bake credentials that pretend to work but actually do not.
 
-See the "Running on WSL2" section below for setup.
+> **Note on the original v1.2 plan.** An earlier 0.3.0 build shipped Open Relay's anonymous public TURN as a default fallback. Live probing showed that endpoint no longer issues relay candidates (creds widely scraped, likely rate-limited). 0.3.1 strips that default and replaces it with the live-probe diagnostic plus honest documentation. Use mirrored mode or a real TURN account.
 
 ## What v1.1 adds
 
@@ -124,11 +125,11 @@ If your work requires protection against any of those, do not use v1.x. Wait for
 
 claude-rooms still never sends file contents over the wire. Everything routes peer-to-peer through y-webrtc; even on TURN fallback only metadata transits the relay.
 
-**TURN-fallback behavior (v1.2).** When direct peer-to-peer cannot be established (WSL2 NAT, symmetric NATs, restrictive corporate networks), claude-rooms falls back to relaying WebRTC traffic through Open Relay's free public TURN servers. The relay sees only DTLS-encrypted bytes; it cannot decrypt Y.Doc contents. It can see your IP, your teammate's IP, and the rough volume and timing of traffic. If you want zero relay traffic, set `disable_default_turn: true` in the plugin config and ensure direct peer-to-peer can succeed (mirrored networking on Windows, native Linux, or native macOS). Power users can also supply their own TURN endpoint via `turn_servers`, or override y-webrtc's signaling servers via `signaling_servers`.
+**TURN behavior (v1.2.1).** Default config is STUN-only; direct peer-to-peer must succeed. If you configure your own TURN via the `turn_servers` userConfig, the relay sees DTLS-encrypted bytes only (it cannot decrypt Y.Doc contents), but it does see your IP, your teammate's IP, and traffic timing/volume. Pick a TURN provider you trust. Power users can also override y-webrtc's signaling servers via `signaling_servers`.
 
 ## Running on WSL2
 
-Default WSL2 networking is a NAT layer that blocks the inbound UDP that WebRTC ICE needs. claude-rooms still connects from WSL2 because it falls back to a free public TURN relay (Open Relay), but the relay adds latency and routes an encrypted data stream through a third party. For direct peer-to-peer with no relay, enable WSL2 mirrored networking.
+Default WSL2 networking is a NAT layer that blocks the inbound UDP that WebRTC ICE needs. Cross-machine sync **does not work** from WSL2 NAT mode without a working TURN relay (and there is no reliable free anonymous public TURN to bake in; see the note above). The supported path is to enable WSL2 mirrored networking.
 
 Requirements: Windows 11 22H2 or higher.
 
@@ -156,7 +157,7 @@ Reopen your terminal. Verify with `/claude-rooms:rooms-doctor`; it will report `
 
 If `ip -4 addr show eth0` still shows an IP in the 172.16.0.0/12 range, mirrored mode did not take effect: double-check the `.wslconfig` path, confirm your Windows build is 22H2+, and that you ran `wsl --shutdown` before reopening the terminal.
 
-If you cannot enable mirrored mode (older Windows, corporate-managed machine, native Linux/macOS), the default TURN fallback handles it transparently; the only difference is the encrypted relay path.
+If you cannot enable mirrored mode (older Windows, corporate-managed machine), the alternative is to configure your own TURN relay via the `turn_servers` userConfig. Run `/claude-rooms:rooms-doctor` after setting it; the live ICE probe will tell you whether the relay actually produces a `relay` candidate. Options include a self-hosted [coturn](https://github.com/coturn/coturn), [Cloudflare TURN](https://developers.cloudflare.com/calls/turn/) (requires a free account and short-lived HMAC creds), or a paid [Metered.ca](https://www.metered.ca/stun-turn) / [Twilio NTS](https://www.twilio.com/docs/stun-turn) tier. None of these can be the default because none of them are free and account-less for arbitrary users.
 
 ## Roadmap (v2 candidates)
 
@@ -173,14 +174,14 @@ The following will be considered for v2. None are committed to v1.x.
 
 - **`@roamhq/wrtc` for the Node WebRTC backend.** y-webrtc was built for browsers, so on Node we inject `@roamhq/wrtc` (the maintained fork of the discontinued `wrtc`) via simple-peer's `peerOpts`. It works on macOS arm64, macOS x64, and Linux x64 with Node 20 LTS. Node 22+ prebuilts are not reliably available across architectures yet, so `package.json` pins `engines.node: ">=20.0.0 <23"`. Upstream context: https://github.com/WonderInventions/node-webrtc.
 - **Windows support is experimental.** Install and local commands (`/rooms-create`, `/rooms-status`, etc.) work on Windows 11 with Node 20 LTS. Real cross-machine WebRTC sync from a Windows peer has not been validated for v1.
-- **WSL2 NAT mode falls back to a public TURN relay.** Default WSL2 networking blocks the inbound UDP that direct WebRTC ICE needs. v1.2 ships an Open Relay TURN fallback so this still works end-to-end; the trade is a public relay sees encrypted bytes (it cannot decode them) and adds latency. For direct peer-to-peer on Windows, enable WSL2 mirrored mode (Win11 22H2+) per the "Running on WSL2" section above. Run `/claude-rooms:rooms-doctor` to verify your mode.
+- **WSL2 NAT mode does not work cross-machine.** Default WSL2 networking blocks the inbound UDP that WebRTC ICE needs. Enable WSL2 mirrored mode (Win11 22H2+) per the "Running on WSL2" section above for direct peer-to-peer, or configure your own TURN via the `turn_servers` userConfig. Run `/claude-rooms:rooms-doctor` to see which path you are on; the command runs a live ICE probe and tells you whether your config produces a `relay` candidate.
 - **Public signaling servers are community-run.** y-webrtc ships with three defaults (`wss://signaling.yjs.dev` and two heroku instances). They can rate-limit or briefly go offline. v1 does not expose an override for this; the room code remains the same regardless.
 - **Mesh degrades past ~6 peers.** claude-rooms is built for pairs and small groups. Larger rooms will work technically, but the mesh topology is not optimised for them.
-- **TURN fallback for symmetric NATs.** About 5% of users on aggressive symmetric NATs will fall back to public TURN, which is slower and rate-limited.
+- **No default TURN relay.** About 5% of users on aggressive symmetric NATs and most WSL2-NAT users will not be able to connect cross-machine without configuring their own TURN. There is no reliable free anonymous public TURN endpoint to bake in (Open Relay's anonymous tier was tried and proven dead in 0.3.0). Use mirrored mode on Windows, native Linux/macOS, or set `turn_servers` to a relay you control or pay for.
 
 ## Status
 
-This is v1.2 (`0.3.0` in `plugin.json`). The deferred-to-v2 list lives in the Roadmap section above; see [CLAUDE.md](./CLAUDE.md) for design rationale and the original v1 trade-off list. Bug fixes bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
+This is v1.2.1 (`0.3.1` in `plugin.json`). The deferred-to-v2 list lives in the Roadmap section above; see [CLAUDE.md](./CLAUDE.md) for design rationale and the original v1 trade-off list. Bug fixes bump the patch version in `plugin.json`; you receive updates via `/plugin update`.
 
 ## License
 

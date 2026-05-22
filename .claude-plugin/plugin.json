@@ -1,6 +1,6 @@
 {
   "name": "claude-rooms",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Multiplayer Claude Code. Two or more developers each running their own Claude Code session, sharing live state of what their agents are doing, in real time.",
   "author": {
     "name": "Connor Hyatt"
@@ -34,21 +34,14 @@
     },
     "turn_servers": {
       "type": "string",
-      "title": "Custom TURN servers (JSON)",
-      "description": "JSON array of RTCIceServer entries to use for WebRTC relay. Example: [{\"urls\":\"turn:my.coturn:3478\",\"username\":\"u\",\"credential\":\"p\"}]. Replaces the default Open Relay TURN entry. STUN entries from the default are retained.",
+      "title": "TURN servers (JSON)",
+      "description": "JSON array of RTCIceServer entries to use as a WebRTC relay. Example: [{\"urls\":\"turn:my.coturn:3478\",\"username\":\"u\",\"credential\":\"p\"}]. Default config is STUN-only (direct P2P required); set this when you self-host coturn, use Cloudflare TURN with HMAC, or have a paid Metered.ca/Twilio TURN account. Run /claude-rooms:rooms-doctor to verify your entry actually produces a relay candidate.",
       "required": false
-    },
-    "disable_default_turn": {
-      "type": "boolean",
-      "title": "Disable the default public TURN relay",
-      "description": "When true, claude-rooms does not configure any TURN server by default. Direct peer-to-peer must succeed (mirrored networking on Windows, no symmetric NAT). When false (default), Open Relay's free anonymous TURN endpoint is used as a fallback. Setting this to true gives you stricter privacy at the cost of not connecting in some network environments.",
-      "required": false,
-      "default": false
     },
     "signaling_servers": {
       "type": "string",
       "title": "Custom y-webrtc signaling server URLs (JSON)",
-      "description": "JSON array of WebSocket URLs to use as y-webrtc signaling servers. Power-user override; leave unset to use the three community defaults baked into y-webrtc.",
+      "description": "JSON array of WebSocket URLs to use as y-webrtc signaling servers. Power-user override; leave unset to use the community defaults baked into y-webrtc.",
       "required": false
     }
   },

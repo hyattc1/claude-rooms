@@ -1,16 +1,17 @@
 // ICE-server resolution for the WebRTC peer connection. Reads userConfig env
-// vars and falls back to a sane default that pierces most restrictive NATs
-// (including WSL2's default NAT mode) without anyone setting up an account.
+// vars; default config is STUN-only.
 //
-// Resolution order:
-//   1. STUN entries from DEFAULT_ICE always present (free, no auth, anonymous).
-//   2. TURN entries: either user-provided via CLAUDE_PLUGIN_OPTION_TURN_SERVERS,
-//      or the Open Relay default, unless CLAUDE_PLUGIN_OPTION_DISABLE_DEFAULT_TURN
-//      is truthy.
-//
-// The default TURN endpoint is Open Relay's long-standing anonymous endpoint
-// widely used in OSS projects (20 GB per IP per month free). Power users
-// pinned to a private coturn can override via userConfig.
+// v1.2 originally shipped Open Relay's anonymous public TURN endpoint as a
+// default fallback. Live probing showed that endpoint no longer issues
+// `relay` candidates (the freely-pasted credentials are effectively
+// rate-limited or rejected). Rather than ship a fallback that silently
+// fails, the default is now STUN-only: direct peer-to-peer must succeed.
+// Users on restrictive networks (WSL2 NAT, symmetric NATs, locked-down
+// corporate firewalls) can configure their own TURN via the
+// `turn_servers` userConfig (self-hosted coturn, Cloudflare TURN, paid
+// Metered tier, Twilio NTS, etc.). /rooms-doctor runs a live ICE probe
+// and reports whether your config actually produces a relay candidate, so
+// dead-weight TURN entries are visible.
 
 export interface IceServer {
   urls: string | string[];
@@ -22,16 +23,6 @@ const DEFAULT_STUN: IceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
 ];
-
-const DEFAULT_OPEN_RELAY_TURN: IceServer = {
-  urls: [
-    "turn:openrelay.metered.ca:80",
-    "turn:openrelay.metered.ca:443",
-    "turns:openrelay.metered.ca:443?transport=tcp",
-  ],
-  username: "openrelayproject",
-  credential: "openrelayproject",
-};
 
 function isTruthyFlag(v: string | undefined): boolean {
   if (v == null) return false;
@@ -46,13 +37,13 @@ function parseUserTurnServers(raw: string | undefined): IceServer[] | null {
     parsed = JSON.parse(raw);
   } catch {
     process.stderr.write(
-      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS is not valid JSON; using default TURN.\n"
+      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS is not valid JSON; ignoring.\n"
     );
     return null;
   }
   if (!Array.isArray(parsed)) {
     process.stderr.write(
-      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS must be a JSON array; using default TURN.\n"
+      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS must be a JSON array; ignoring.\n"
     );
     return null;
   }
@@ -70,7 +61,7 @@ function parseUserTurnServers(raw: string | undefined): IceServer[] | null {
   }
   if (out.length === 0) {
     process.stderr.write(
-      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS parsed but contained no valid RTCIceServer entries; using default TURN.\n"
+      "claude-rooms: CLAUDE_PLUGIN_OPTION_TURN_SERVERS parsed but contained no valid RTCIceServer entries; ignoring.\n"
     );
     return null;
   }
@@ -100,17 +91,19 @@ function parseUserSignalingServers(raw: string | undefined): string[] | null {
 }
 
 /** Returns the ICE-server list to hand to simple-peer via peerOpts.config.iceServers.
- *  The result is a fresh frozen array so callers cannot mutate the shared config. */
+ *  Default is STUN-only. TURN entries come from CLAUDE_PLUGIN_OPTION_TURN_SERVERS
+ *  when provided. The result is a frozen array. */
 export function resolveIceServers(): readonly IceServer[] {
   const userTurn = parseUserTurnServers(process.env.CLAUDE_PLUGIN_OPTION_TURN_SERVERS);
-  const disableDefaultTurn = isTruthyFlag(process.env.CLAUDE_PLUGIN_OPTION_DISABLE_DEFAULT_TURN);
   const out: IceServer[] = [...DEFAULT_STUN];
-  if (userTurn) {
-    out.push(...userTurn);
-  } else if (!disableDefaultTurn) {
-    out.push({ ...DEFAULT_OPEN_RELAY_TURN });
-  }
+  if (userTurn) out.push(...userTurn);
   return Object.freeze(out);
+}
+
+/** True if the user has configured at least one TURN entry. Used by the
+ *  doctor's recommendation logic. */
+export function userTurnConfigured(): boolean {
+  return parseUserTurnServers(process.env.CLAUDE_PLUGIN_OPTION_TURN_SERVERS) !== null;
 }
 
 /** Optional override for y-webrtc signaling. Returns null when no override
@@ -120,34 +113,20 @@ export function resolveSignalingServers(): string[] | null {
   return parseUserSignalingServers(process.env.CLAUDE_PLUGIN_OPTION_SIGNALING_SERVERS);
 }
 
-/** Short single-line description of the resolved ICE config, suitable for
- *  /rooms-status and /rooms-doctor output. Shape:
- *    "2 STUN + 1 TURN (Open Relay)" or "2 STUN + 1 TURN (custom)" or "2 STUN, no TURN" */
+/** Short single-line description of the resolved ICE config. */
 export function summarizeIceServers(servers: readonly IceServer[]): string {
   let stunCount = 0;
   let turnCount = 0;
-  let sawOpenRelay = false;
-  let sawCustomTurn = false;
   for (const s of servers) {
     const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
     for (const u of urls) {
       if (u.startsWith("stun:")) stunCount += 1;
-      else if (u.startsWith("turn:") || u.startsWith("turns:")) {
-        turnCount += 1;
-        if (u.includes("openrelay.metered.ca")) sawOpenRelay = true;
-        else sawCustomTurn = true;
-      }
+      else if (u.startsWith("turn:") || u.startsWith("turns:")) turnCount += 1;
     }
   }
-  if (turnCount === 0) return `${stunCount} STUN, no TURN`;
-  const label = sawOpenRelay && !sawCustomTurn
-    ? "Open Relay"
-    : sawCustomTurn && !sawOpenRelay
-    ? "custom"
-    : "mixed";
-  return `${stunCount} STUN + ${turnCount} TURN (${label})`;
+  if (turnCount === 0) return `${stunCount} STUN, no TURN (direct P2P only)`;
+  return `${stunCount} STUN + ${turnCount} TURN (user-configured)`;
 }
 
-/** Exported for tests so they can compare against the live default value. */
-export const _DEFAULT_OPEN_RELAY_TURN = DEFAULT_OPEN_RELAY_TURN;
+/** Exported for tests. */
 export const _DEFAULT_STUN = DEFAULT_STUN;

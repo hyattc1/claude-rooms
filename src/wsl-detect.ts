@@ -3,6 +3,7 @@
 // the SessionStart one-time hint.
 
 import { readFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 
 let wslCache: boolean | null = null;
 
@@ -74,16 +75,41 @@ export function isWslNatGateway(ip: string): boolean {
   return b >= 16 && b <= 31;
 }
 
+/** Counts non-internal IPv4 interfaces. WSL2 NAT mode exposes a single
+ *  non-internal interface (eth0). Mirrored mode mirrors every host adapter
+ *  into WSL, so this count is typically >1 (Wi-Fi, Ethernet, vEthernet ...). */
+export function nonInternalInterfaceCount(): number {
+  const ifs = networkInterfaces();
+  let count = 0;
+  for (const arr of Object.values(ifs)) {
+    if (!arr) continue;
+    for (const a of arr) {
+      if (a.family === "IPv4" && !a.internal) { count += 1; break; }
+    }
+  }
+  return count;
+}
+
 /** Returns the inferred WSL2 networking mode.
- *  - "nat": default WSL2 NAT subnet (172.16.0.0/12). Inbound UDP blocked.
- *  - "mirrored": gateway is the host's actual LAN router. Direct WebRTC works.
- *  - "unknown": cannot determine (not WSL, or /proc files unreadable, or
- *               gateway IP outside the expected ranges). Callers should
- *               treat "unknown" as "do not show a NAT warning". */
+ *  - "nat": default WSL2 NAT subnet (172.16.0.0/12) AND a single non-internal
+ *           interface. Inbound UDP blocked.
+ *  - "mirrored": gateway is on the host's actual LAN, OR multiple non-internal
+ *                interfaces are visible (the host's adapters mirrored in).
+ *  - "unknown": signals conflict (e.g. corporate LAN happens to be in
+ *               172.16.0.0/12 with multiple visible interfaces), or /proc
+ *               unreadable. Callers should treat "unknown" as "do not show
+ *               a NAT warning" - the doctor's live ICE probe is more
+ *               definitive than this heuristic anyway. */
 export function wslNetworkingMode(): "mirrored" | "nat" | "unknown" {
   if (!isWSL()) return "unknown";
   const gw = readDefaultGateway();
   if (!gw) return "unknown";
-  if (isWslNatGateway(gw)) return "nat";
-  return "mirrored";
+  const inNatRange = isWslNatGateway(gw);
+  const ifCount = nonInternalInterfaceCount();
+  if (inNatRange && ifCount <= 1) return "nat";
+  if (!inNatRange) return "mirrored";
+  // Gateway is in 172.16.0.0/12 but multiple non-internal interfaces are
+  // visible: probably a corporate LAN that happens to be in that range under
+  // mirrored mode. We cannot tell for sure, so do not warn.
+  return "unknown";
 }

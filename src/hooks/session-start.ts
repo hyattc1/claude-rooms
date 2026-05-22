@@ -20,7 +20,7 @@ const SHARE_PROMPTS_HINT =
   "Note: prompt sharing is disabled by default for privacy. Teammates do not see what you ask Claude. Set share_prompts: true in the plugin config if you want them to.";
 
 const WSL2_NAT_HINT =
-  "Note: you are running in WSL2 with NAT networking. Direct WebRTC peer-to-peer to teammates may fail; the plugin will fall back to a public TURN relay (DTLS-encrypted bytes only). For a faster, no-relay connection, enable WSL2 mirrored mode on Windows 11 22H2+. See the README \"Running on WSL2\" section for the setup, or run /claude-rooms:rooms-doctor for a diagnostic.";
+  "Note: you are running in WSL2 with NAT networking, which blocks the inbound UDP that WebRTC needs. Cross-machine sync will not work in this mode unless you configure a working TURN relay via the turn_servers userConfig. The supported fix is to enable WSL2 mirrored mode on Windows 11 22H2+ (no relay needed). See the README \"Running on WSL2\" section, or run /claude-rooms:rooms-doctor for a live diagnostic.";
 
 /** Compute SessionStart hint paragraphs that should fire for this session.
  *  Each returned hint is appended to additionalContext and marked as shown so
